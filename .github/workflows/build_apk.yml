@@ -3,7 +3,7 @@ name: Build Jarvis APK
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch:  # Permite rodar manualmente
+  workflow_dispatch:
 
 jobs:
   build:
@@ -28,14 +28,21 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ hashFiles('**/*.gradle*') }}
+          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      - name: Baixar gradle-wrapper.jar
+        run: |
+          mkdir -p gradle/wrapper
+          curl -L -o gradle/wrapper/gradle-wrapper.jar \
+            https://github.com/gradle/gradle/raw/v8.2.0/gradle/wrapper/gradle-wrapper.jar
 
       - name: Permissão gradlew
         run: chmod +x gradlew
 
       - name: Criar local.properties com chave
         run: |
-          echo "sdk.dir=$ANDROID_SDK_ROOT" >> local.properties
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}" >> local.properties
 
       - name: Build APK Debug
