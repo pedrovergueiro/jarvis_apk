@@ -5,10 +5,6 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
-defaults:
-  run:
-    working-directory: jarvis-android
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -32,25 +28,28 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ hashFiles('jarvis-android/**/*.gradle*', 'jarvis-android/**/gradle-wrapper.properties') }}
+          key: gradle-${{ hashFiles('jarvis-android/**/*.gradle*') }}
           restore-keys: gradle-
 
-      - name: Baixar gradle-wrapper.jar
+      - name: Setup e Build APK
         run: |
+          # Entrar na pasta do projeto
+          cd jarvis-android
+
+          # Baixar gradle-wrapper.jar
           mkdir -p gradle/wrapper
           curl -L -o gradle/wrapper/gradle-wrapper.jar \
             https://github.com/gradle/gradle/raw/v8.2.0/gradle/wrapper/gradle-wrapper.jar
 
-      - name: Permissão gradlew
-        run: chmod +x gradlew
+          # Permissão
+          chmod +x gradlew
 
-      - name: Criar local.properties com chave
-        run: |
+          # Criar local.properties
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}" >> local.properties
 
-      - name: Build APK Debug
-        run: ./gradlew assembleDebug --stacktrace
+          # Build
+          ./gradlew assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
