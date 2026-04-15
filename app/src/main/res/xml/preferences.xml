@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <PreferenceCategory android:title="Inteligência Artificial">
+        <ListPreference
+            android:key="ai_model"
+            android:title="Modelo de IA"
+            android:summary="Selecione o modelo padrão"
+            android:defaultValue="auto" />
+
+        <SwitchPreferenceCompat
+            android:key="offline_mode"
+            android:title="Modo Offline"
+            android:summary="Usar apenas respostas locais"
+            android:defaultValue="false" />
+    </PreferenceCategory>
+
+    <PreferenceCategory android:title="Voz">
+        <SwitchPreferenceCompat
+            android:key="wake_word_enabled"
+            android:title="Wake Word"
+            android:summary="Ativar por 'Jarvis'"
+            android:defaultValue="true" />
+
+        <ListPreference
+            android:key="tts_speed"
+            android:title="Velocidade da Voz"
+            android:entries="@array/tts_speed_entries"
+            android:entryValues="@array/tts_speed_values"
+            android:defaultValue="1.1" />
+    </PreferenceCategory>
+
+    <PreferenceCategory android:title="Permissões">
+        <Preference
+            android:key="notification_access"
+            android:title="Acesso a Notificações"
+            android:summary="Necessário para ler notificações" />
+
+        <Preference
+            android:key="accessibility_access"
+            android:title="Serviço de Acessibilidade"
+            android:summary="Necessário para automação de apps" />
+
+        <Preference
+            android:key="write_settings"
+            android:title="Alterar Configurações do Sistema"
+            android:summary="Necessário para controlar brilho" />
+    </PreferenceCategory>
+
+    <PreferenceCategory android:title="Sistema">
+        <SwitchPreferenceCompat
+            android:key="start_on_boot"
+            android:title="Iniciar com o dispositivo"
+            android:defaultValue="true" />
+
+        <SwitchPreferenceCompat
+            android:key="bluetooth_mode"
+            android:title="Modo Fone Bluetooth"
+            android:summary="Otimizar para uso com fone"
+            android:defaultValue="true" />
+    </PreferenceCategory>
+
+</PreferenceScreen>

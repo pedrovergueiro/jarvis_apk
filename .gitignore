@@ -1,0 +1,23 @@
+# Local properties (contém chaves e SDK path — NUNCA commitar)
+local.properties
+
+# Build
+*.apk
+*.aab
+build/
+app/build/
+.gradle/
+
+# Android Studio
+.idea/
+*.iml
+.DS_Store
+
+# Keystore
+*.jks
+*.keystore
+
+# Python
+backend/venv/
+backend/__pycache__/
+backend/*.pyc
