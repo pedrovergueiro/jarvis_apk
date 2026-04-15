@@ -28,32 +28,24 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ hashFiles('jarvis-android/**/*.gradle*') }}
+          key: gradle-${{ hashFiles('**/*.gradle*') }}
           restore-keys: gradle-
 
       - name: Setup e Build APK
         run: |
-          # Entrar na pasta do projeto
-          cd jarvis-android
-
-          # Baixar gradle-wrapper.jar
-          mkdir -p gradle/wrapper
           curl -L -o gradle/wrapper/gradle-wrapper.jar \
             https://github.com/gradle/gradle/raw/v8.2.0/gradle/wrapper/gradle-wrapper.jar
 
-          # Permissão
           chmod +x gradlew
 
-          # Criar local.properties
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}" >> local.properties
 
-          # Build
           ./gradlew assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: jarvis-debug-apk
-          path: jarvis-android/app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 7
