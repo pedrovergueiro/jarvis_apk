@@ -4,12 +4,10 @@ import android.content.Context
 import android.util.Log
 import com.jarvis.assistant.automation.AutomationEngine
 import com.jarvis.assistant.memory.MemoryManager
-import org.json.JSONObject
 
 /**
- * Roteador de intenções: interpreta comandos de voz e direciona para o executor correto.
- * Funciona offline (regex + keywords) para comandos básicos.
- * Usa IA apenas para intenções ambíguas.
+ * Roteador de intenções — detecta comandos por palavras-chave simples.
+ * Sem regex complexo. Rápido e confiável.
  */
 class IntentRouter(
     private val context: Context,
@@ -22,198 +20,178 @@ class IntentRouter(
     private val executor = CommandExecutor(context)
     private val automationEngine = AutomationEngine(context)
 
-    // Mapeamento de padrões para intenções
-    private val intentPatterns = listOf(
-        // Abrir aplicativos
-        IntentPattern(
-            intent = "OPEN_APP",
-            patterns = listOf("abr[ei]r?\\s+(.+)", "abre\\s+(.+)", "abrir\\s+(.+)", "lança\\s+(.+)", "inicia\\s+(.+)"),
-            extractors = listOf { m -> mapOf("app" to m.groupValues.getOrNull(1)?.trim()) }
-        ),
-        // WhatsApp
-        IntentPattern(
-            intent = "SEND_WHATSAPP",
-            patterns = listOf(
-                "manda?r?\\s+mensagem\\s+(?:no|para|pro)\\s+(.+?)\\s+(?:no\\s+)?whatsapp",
-                "whatsapp\\s+(?:para|pro)\\s+(.+?)\\s+(?:diz|fala|manda)",
-                "manda?r?\\s+(.+?)\\s+(?:no|pelo)\\s+whatsapp"
-            ),
-            extractors = listOf { m -> mapOf("contact" to m.groupValues.getOrNull(1)?.trim()) }
-        ),
-        // Notificações
-        IntentPattern(
-            intent = "READ_NOTIFICATIONS",
-            patterns = listOf("l[eê]r?\\s+notifica[çc][õo]es?", "o que\\s+(?:tem|há)\\s+de\\s+novo", "minhas\\s+notifica[çc][õo]es?"),
-            extractors = listOf { _ -> emptyMap() }
-        ),
-        // Volume
-        IntentPattern(
-            intent = "SET_VOLUME",
-            patterns = listOf(
-                "(?:aumenta|sobe|eleva)\\s+(?:o\\s+)?volume",
-                "(?:diminui|baixa|reduz)\\s+(?:o\\s+)?volume",
-                "volume\\s+(\\d+)",
-                "(?:muta|silencia|mudo)"
-            ),
-            extractors = listOf { m ->
-                val action = when {
-                    m.value.contains(Regex("aumenta|sobe|eleva")) -> "up"
-                    m.value.contains(Regex("diminui|baixa|reduz")) -> "down"
-                    m.value.contains(Regex("muta|silencia|mudo")) -> "mute"
-                    else -> "set"
-                }
-                mapOf("action" to action, "level" to (m.groupValues.getOrNull(1) ?: ""))
-            }
-        ),
-        // Brilho
-        IntentPattern(
-            intent = "SET_BRIGHTNESS",
-            patterns = listOf(
-                "(?:aumenta|sobe)\\s+(?:o\\s+)?brilho",
-                "(?:diminui|baixa)\\s+(?:o\\s+)?brilho",
-                "brilho\\s+(\\d+)"
-            ),
-            extractors = listOf { m ->
-                val action = if (m.value.contains(Regex("aumenta|sobe"))) "up" else "down"
-                mapOf("action" to action, "level" to (m.groupValues.getOrNull(1) ?: ""))
-            }
-        ),
-        // Lembrete / Alarme
-        IntentPattern(
-            intent = "CREATE_REMINDER",
-            patterns = listOf(
-                "cria?r?\\s+lembrete\\s+(?:para|de)\\s+(.+)",
-                "me\\s+lembra?\\s+(?:de|que)\\s+(.+)",
-                "alarme\\s+(?:para|às?)\\s+(.+)",
-                "timer\\s+(?:de|para)\\s+(\\d+)\\s*(?:minutos?|horas?|segundos?)"
-            ),
-            extractors = listOf { m -> mapOf("text" to m.groupValues.getOrNull(1)?.trim()) }
-        ),
-        // Busca na internet
-        IntentPattern(
-            intent = "WEB_SEARCH",
-            patterns = listOf(
-                "busca?r?\\s+(?:na\\s+internet|no\\s+google)?\\s+(.+)",
-                "pesquisa?r?\\s+(.+)",
-                "googla?r?\\s+(.+)",
-                "procura?r?\\s+(.+)"
-            ),
-            extractors = listOf { m -> mapOf("query" to m.groupValues.getOrNull(1)?.trim()) }
-        ),
-        // Modo foco
-        IntentPattern(
-            intent = "FOCUS_MODE",
-            patterns = listOf(
-                "modo\\s+foco",
-                "não\\s+perturbe",
-                "silêncio\\s+total",
-                "foco\\s+total"
-            ),
-            extractors = listOf { _ -> emptyMap() }
-        ),
-        // Resumo do dia
-        IntentPattern(
-            intent = "DAILY_SUMMARY",
-            patterns = listOf(
-                "resumo\\s+do\\s+dia",
-                "o\\s+que\\s+aconteceu\\s+hoje",
-                "meu\\s+dia",
-                "agenda\\s+de\\s+hoje"
-            ),
-            extractors = listOf { _ -> emptyMap() }
-        ),
-        // Ligar para contato
-        IntentPattern(
-            intent = "MAKE_CALL",
-            patterns = listOf(
-                "liga?r?\\s+(?:para|pro)\\s+(.+)",
-                "chama?r?\\s+(.+)",
-                "telefona?r?\\s+(?:para|pro)\\s+(.+)"
-            ),
-            extractors = listOf { m -> mapOf("contact" to m.groupValues.getOrNull(1)?.trim()) }
-        ),
-        // Flashlight
-        IntentPattern(
-            intent = "TOGGLE_FLASHLIGHT",
-            patterns = listOf("lanterna", "flash", "luz\\s+(?:da\\s+)?câmera"),
-            extractors = listOf { _ -> emptyMap() }
-        ),
-        // WiFi / Bluetooth
-        IntentPattern(
-            intent = "TOGGLE_WIFI",
-            patterns = listOf("(?:liga|desliga)\\s+(?:o\\s+)?wi.?fi", "wi.?fi\\s+(?:on|off|ligar|desligar)"),
-            extractors = listOf { m -> mapOf("action" to if (m.value.contains("liga")) "on" else "off") }
-        ),
-        // Modo estudo
-        IntentPattern(
-            intent = "STUDY_MODE",
-            patterns = listOf("modo\\s+estudo", "me\\s+explica\\s+(.+)", "explica\\s+(.+)\\s+detalhado"),
-            extractors = listOf { m -> mapOf("topic" to m.groupValues.getOrNull(1)?.trim()) }
-        )
-    )
-
     /**
-     * Tenta identificar a intenção do comando.
-     * Retorna null se não encontrar (vai para IA).
+     * Detecta intenção por palavras-chave.
+     * Retorna null se não reconhecer → vai para IA.
      */
     fun route(command: String): DetectedIntent? {
         val lower = command.lowercase().trim()
 
-        for (pattern in intentPatterns) {
-            for ((index, regex) in pattern.patterns.withIndex()) {
-                val match = Regex(regex, RegexOption.IGNORE_CASE).find(lower)
-                if (match != null) {
-                    val params = pattern.extractors.getOrNull(index)?.invoke(match) ?: emptyMap()
-                    Log.d(TAG, "Intenção detectada: ${pattern.intent} params=$params")
-                    return DetectedIntent(pattern.intent, params, command)
-                }
+        return when {
+            // ── Abrir apps ──────────────────────────────────────────────────
+            lower.contains("abre") || lower.contains("abrir") || lower.contains("abre o") ||
+            lower.contains("abrir o") || lower.contains("lança") || lower.contains("inicia") -> {
+                val app = extractAfterKeyword(lower, listOf("abre o", "abre a", "abre", "abrir o", "abrir a", "abrir", "lança", "inicia"))
+                if (app.isNotBlank()) DetectedIntent("OPEN_APP", mapOf("app" to app), command) else null
             }
-        }
 
-        Log.d(TAG, "Nenhuma intenção detectada para: $command")
-        return null
+            // ── WhatsApp ─────────────────────────────────────────────────────
+            lower.contains("whatsapp") && (lower.contains("manda") || lower.contains("envia") ||
+            lower.contains("mensagem") || lower.contains("fala")) -> {
+                val contact = extractContact(lower)
+                DetectedIntent("SEND_WHATSAPP", mapOf("contact" to contact), command)
+            }
+
+            // ── Notificações ─────────────────────────────────────────────────
+            lower.contains("notificaç") || lower.contains("o que tem de novo") ||
+            lower.contains("minhas mensagens") -> {
+                DetectedIntent("READ_NOTIFICATIONS", emptyMap(), command)
+            }
+
+            // ── Volume ───────────────────────────────────────────────────────
+            (lower.contains("volume") || lower.contains("som")) &&
+            (lower.contains("aumenta") || lower.contains("sobe") || lower.contains("mais alto")) -> {
+                DetectedIntent("SET_VOLUME", mapOf("action" to "up"), command)
+            }
+            (lower.contains("volume") || lower.contains("som")) &&
+            (lower.contains("diminui") || lower.contains("baixa") || lower.contains("menos")) -> {
+                DetectedIntent("SET_VOLUME", mapOf("action" to "down"), command)
+            }
+            lower.contains("muta") || lower.contains("silencia") || lower.contains("sem som") -> {
+                DetectedIntent("SET_VOLUME", mapOf("action" to "mute"), command)
+            }
+
+            // ── Brilho ───────────────────────────────────────────────────────
+            lower.contains("brilho") && (lower.contains("aumenta") || lower.contains("sobe") || lower.contains("mais")) -> {
+                DetectedIntent("SET_BRIGHTNESS", mapOf("action" to "up"), command)
+            }
+            lower.contains("brilho") && (lower.contains("diminui") || lower.contains("baixa") || lower.contains("menos")) -> {
+                DetectedIntent("SET_BRIGHTNESS", mapOf("action" to "down"), command)
+            }
+
+            // ── Lembrete / Alarme / Timer ─────────────────────────────────────
+            lower.contains("lembrete") || lower.contains("me lembra") -> {
+                val text = extractAfterKeyword(lower, listOf("lembrete de", "lembrete para", "lembrete", "me lembra de", "me lembra"))
+                DetectedIntent("CREATE_REMINDER", mapOf("text" to text), command)
+            }
+            lower.contains("alarme") -> {
+                DetectedIntent("CREATE_REMINDER", mapOf("text" to command), command)
+            }
+            lower.contains("timer") || lower.contains("cronômetro") -> {
+                DetectedIntent("CREATE_REMINDER", mapOf("text" to command), command)
+            }
+
+            // ── Busca ─────────────────────────────────────────────────────────
+            lower.contains("busca") || lower.contains("pesquisa") ||
+            lower.contains("googla") || lower.contains("procura") -> {
+                val query = extractAfterKeyword(lower, listOf("busca no google", "busca na internet", "busca", "pesquisa", "googla", "procura"))
+                DetectedIntent("WEB_SEARCH", mapOf("query" to query), command)
+            }
+
+            // ── Modo foco ─────────────────────────────────────────────────────
+            lower.contains("modo foco") || lower.contains("não perturbe") ||
+            lower.contains("silêncio total") -> {
+                DetectedIntent("FOCUS_MODE", emptyMap(), command)
+            }
+
+            // ── Resumo do dia ─────────────────────────────────────────────────
+            lower.contains("resumo do dia") || lower.contains("o que aconteceu hoje") ||
+            lower.contains("minha agenda") -> {
+                DetectedIntent("DAILY_SUMMARY", emptyMap(), command)
+            }
+
+            // ── Ligar ─────────────────────────────────────────────────────────
+            (lower.contains("liga") || lower.contains("ligar") || lower.contains("chama")) &&
+            (lower.contains("para") || lower.contains("pro") || lower.contains("pra")) -> {
+                val contact = extractContact(lower)
+                DetectedIntent("MAKE_CALL", mapOf("contact" to contact), command)
+            }
+
+            // ── Lanterna ─────────────────────────────────────────────────────
+            lower.contains("lanterna") || lower.contains("flash") -> {
+                DetectedIntent("TOGGLE_FLASHLIGHT", emptyMap(), command)
+            }
+
+            // ── Câmera ────────────────────────────────────────────────────────
+            lower.contains("câmera") || lower.contains("camera") || lower.contains("tira foto") ||
+            lower.contains("tira uma foto") -> {
+                DetectedIntent("OPEN_CAMERA", emptyMap(), command)
+            }
+
+            // ── Status / hora / data ──────────────────────────────────────────
+            lower.contains("que horas") || lower.contains("hora agora") -> {
+                DetectedIntent("GET_TIME", emptyMap(), command)
+            }
+            lower.contains("que dia") || lower.contains("data hoje") -> {
+                DetectedIntent("GET_DATE", emptyMap(), command)
+            }
+
+            else -> null
+        }
     }
 
-    /**
-     * Executa a intenção detectada.
-     */
     suspend fun execute(intent: DetectedIntent, originalCommand: String): String {
-        // Verificar se é automação antes de executar intenção padrão
-        if (automationEngine.isAutomationCommand(originalCommand)) {
-            return automationEngine.execute(originalCommand)
-        }
+        Log.d(TAG, "Executando: ${intent.type} params=${intent.params}")
         return try {
             when (intent.type) {
                 "OPEN_APP" -> executor.openApp(intent.params["app"] ?: "")
                 "SEND_WHATSAPP" -> executor.sendWhatsApp(intent.params["contact"] ?: "")
                 "READ_NOTIFICATIONS" -> executor.readNotifications()
-                "SET_VOLUME" -> executor.setVolume(intent.params["action"] ?: "up", intent.params["level"]?.toIntOrNull())
-                "SET_BRIGHTNESS" -> executor.setBrightness(intent.params["action"] ?: "up", intent.params["level"]?.toIntOrNull())
+                "SET_VOLUME" -> executor.setVolume(intent.params["action"] ?: "up", null)
+                "SET_BRIGHTNESS" -> executor.setBrightness(intent.params["action"] ?: "up", null)
                 "CREATE_REMINDER" -> executor.createReminder(intent.params["text"] ?: originalCommand)
                 "WEB_SEARCH" -> executor.webSearch(intent.params["query"] ?: originalCommand)
                 "FOCUS_MODE" -> executor.toggleFocusMode()
                 "DAILY_SUMMARY" -> executor.getDailySummary(memoryManager)
                 "MAKE_CALL" -> executor.makeCall(intent.params["contact"] ?: "")
                 "TOGGLE_FLASHLIGHT" -> executor.toggleFlashlight()
-                "TOGGLE_WIFI" -> executor.toggleWifi(intent.params["action"] == "on")
-                "STUDY_MODE" -> null ?: "Entrando em modo estudo. Pode perguntar o que quiser."
+                "OPEN_CAMERA" -> {
+                    automationEngine.execute("abre a câmera")
+                }
+                "GET_TIME" -> {
+                    val fmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale("pt", "BR"))
+                    "São ${fmt.format(java.util.Date())}."
+                }
+                "GET_DATE" -> {
+                    val fmt = java.text.SimpleDateFormat("EEEE, dd/MM/yyyy", java.util.Locale("pt", "BR"))
+                    fmt.format(java.util.Date())
+                }
                 else -> "Comando não reconhecido."
-            } ?: "Ação executada."
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao executar ${intent.type}: ${e.message}")
-            "Não consegui executar essa ação. ${e.message}"
+            "Não consegui executar isso. ${e.message}"
         }
+    }
+
+    private fun extractAfterKeyword(text: String, keywords: List<String>): String {
+        for (kw in keywords.sortedByDescending { it.length }) {
+            val idx = text.indexOf(kw)
+            if (idx >= 0) {
+                val after = text.substring(idx + kw.length).trim()
+                if (after.isNotBlank()) return after
+            }
+        }
+        return text
+    }
+
+    private fun extractContact(text: String): String {
+        val contactKeywords = listOf("para o", "para a", "para", "pro", "pra", "ao", "à")
+        for (kw in contactKeywords) {
+            val idx = text.indexOf(kw)
+            if (idx >= 0) {
+                val after = text.substring(idx + kw.length).trim()
+                    .replace(Regex("\\s+(no|pelo|via|no|whatsapp|zap).*"), "")
+                    .trim()
+                if (after.isNotBlank()) return after
+            }
+        }
+        return ""
     }
 }
 
 data class DetectedIntent(
     val type: String,
-    val params: Map<String, String?>,
+    val params: Map<String, String>,
     val originalCommand: String
-)
-
-data class IntentPattern(
-    val intent: String,
-    val patterns: List<String>,
-    val extractors: List<(MatchResult) -> Map<String, String?>>
 )

@@ -15,11 +15,6 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.sqrt
 
-/**
- * Wake word detector via AudioRecord + Whisper.
- * Funciona com tela apagada e em background.
- * VAD detecta energia de voz → grava → Whisper transcreve → checa "jarvis"
- */
 class WakeWordDetector(
     private val context: Context,
     private val onWakeWord: () -> Unit
@@ -32,13 +27,12 @@ class WakeWordDetector(
         private const val VAD_THRESHOLD = 600.0
         private const val CHUNK_DURATION_MS = 2500L
         private val WAKE_WORDS = listOf(
-            "natiele", "natiéle", "natiele", "nati", "natiely",
+            "natiele", "natiéle", "nati", "natiely",
             "ei natiele", "hey natiele", "ok natiele", "oi natiele",
-            "nathiele", "natieli", "natele", "natiéli"
+            "nathiele", "natieli", "natele"
         )
     }
 
-    // AtomicBoolean para ser seguro entre threads/coroutines
     private val running = AtomicBoolean(false)
     private var vadJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -56,58 +50,54 @@ class WakeWordDetector(
         vadJob = scope.launch {
             val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL, ENCODING)
             var audioRecord: AudioRecord? = null
-
             try {
                 audioRecord = AudioRecord(
                     MediaRecorder.AudioSource.MIC,
-                    SAMPLE_RATE, CHANNEL, ENCODING,
-                    bufferSize * 4
+                    SAMPLE_RATE, CHANNEL, ENCODING, bufferSize * 4
                 )
-
                 if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
                     Log.e(TAG, "AudioRecord não inicializou")
                     return@launch
                 }
-
                 audioRecord.startRecording()
                 val buffer = ShortArray(bufferSize)
 
                 while (running.get()) {
+                    // CRÍTICO: não ouvir enquanto TTS está falando
+                    if (MicrophoneLock.isLocked()) {
+                        delay(200L)
+                        continue
+                    }
+
                     val read = audioRecord.read(buffer, 0, bufferSize)
                     if (read <= 0) continue
 
                     val rms = calculateRMS(buffer, read)
-
                     if (rms > VAD_THRESHOLD) {
-                        Log.d(TAG, "Voz detectada RMS=$rms, gravando chunk...")
+                        Log.d(TAG, "Voz detectada RMS=$rms")
                         audioRecord.stop()
 
+                        // Esperar TTS terminar antes de gravar
+                        while (MicrophoneLock.isLocked()) { delay(100L) }
+
                         val chunk = recordChunk(CHUNK_DURATION_MS)
-                        if (chunk.isNotEmpty()) {
+                        if (chunk.isNotEmpty() && running.get()) {
                             val text = whisperClient.transcribe(chunk)
-                            Log.d(TAG, "Whisper: '$text'")
+                            Log.d(TAG, "Whisper wake: '$text'")
                             val lower = text.lowercase().trim()
                             val found = WAKE_WORDS.any { lower.contains(it) }
-                            if (found && running.get()) {
+                            if (found && running.get() && !MicrophoneLock.isLocked()) {
                                 running.set(false)
-                                Log.d(TAG, "Wake word detectada!")
                                 withContext(Dispatchers.Main) { onWakeWord() }
                                 return@launch
                             }
                         }
 
-                        if (running.get()) {
-                            audioRecord.startRecording()
-                        }
+                        if (running.get()) audioRecord.startRecording()
                     }
                 }
             } finally {
-                try {
-                    audioRecord?.stop()
-                    audioRecord?.release()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Erro ao liberar AudioRecord: ${e.message}")
-                }
+                try { audioRecord?.stop(); audioRecord?.release() } catch (_: Exception) {}
             }
         }
     }
@@ -115,41 +105,31 @@ class WakeWordDetector(
     private fun recordChunk(durationMs: Long): ShortArray {
         val totalSamples = (SAMPLE_RATE * durationMs / 1000).toInt()
         val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL, ENCODING)
-        var audioRecord: AudioRecord? = null
+        var ar: AudioRecord? = null
         return try {
-            audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                SAMPLE_RATE, CHANNEL, ENCODING,
-                bufferSize * 4
-            )
+            ar = AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE, CHANNEL, ENCODING, bufferSize * 4)
             val data = ShortArray(totalSamples)
             var offset = 0
-            audioRecord.startRecording()
+            ar.startRecording()
             val buf = ShortArray(bufferSize)
             while (offset < totalSamples) {
-                val read = audioRecord.read(buf, 0, minOf(bufferSize, totalSamples - offset))
+                val read = ar.read(buf, 0, minOf(bufferSize, totalSamples - offset))
                 if (read <= 0) break
                 buf.copyInto(data, offset, 0, read)
                 offset += read
             }
             data
         } catch (e: Exception) {
-            Log.e(TAG, "Erro ao gravar chunk: ${e.message}")
+            Log.e(TAG, "Erro recordChunk: ${e.message}")
             ShortArray(0)
         } finally {
-            try {
-                audioRecord?.stop()
-                audioRecord?.release()
-            } catch (e: Exception) { /* ignorar */ }
+            try { ar?.stop(); ar?.release() } catch (_: Exception) {}
         }
     }
 
     private fun calculateRMS(buffer: ShortArray, length: Int): Double {
         var sum = 0.0
-        for (i in 0 until length) {
-            val s = buffer[i].toDouble()
-            sum += s * s
-        }
+        for (i in 0 until length) { val s = buffer[i].toDouble(); sum += s * s }
         return sqrt(sum / length)
     }
 

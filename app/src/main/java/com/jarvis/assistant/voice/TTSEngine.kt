@@ -6,11 +6,6 @@ import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import java.util.Locale
 
-/**
- * Motor TTS com voz masculina humanizada em pt-BR.
- * Usa Android TTS nativo com ajustes de pitch e velocidade
- * para soar mais natural e menos robótico.
- */
 class TTSEngine(private val context: Context) {
 
     companion object {
@@ -21,9 +16,7 @@ class TTSEngine(private val context: Context) {
     private var isReady: Boolean = false
     private var onDoneCallback: (() -> Unit)? = null
 
-    init {
-        initTTS()
-    }
+    init { initTTS() }
 
     private fun initTTS() {
         tts = TextToSpeech(context) { status ->
@@ -32,19 +25,31 @@ class TTSEngine(private val context: Context) {
                 isReady = true
                 Log.d(TAG, "TTS pronto")
             } else {
-                Log.e(TAG, "Falha ao iniciar TTS: $status")
+                Log.e(TAG, "Falha TTS: $status")
             }
         }
 
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {}
-            override fun onDone(utteranceId: String?) {
-                onDoneCallback?.invoke()
-                onDoneCallback = null
+            override fun onStart(utteranceId: String?) {
+                // Bloquear microfone quando TTS começa a falar
+                MicrophoneLock.lock()
+                Log.d(TAG, "Mic bloqueado — TTS falando")
             }
+
+            override fun onDone(utteranceId: String?) {
+                // Só desbloquear quando TODA a fila terminar
+                if (tts?.isSpeaking == false) {
+                    MicrophoneLock.unlock()
+                    Log.d(TAG, "Mic liberado — TTS terminou")
+                    onDoneCallback?.invoke()
+                    onDoneCallback = null
+                }
+            }
+
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
-                Log.e(TAG, "Erro TTS utterance: $utteranceId")
+                MicrophoneLock.unlock()
+                Log.e(TAG, "Erro TTS")
                 onDoneCallback?.invoke()
                 onDoneCallback = null
             }
@@ -53,79 +58,71 @@ class TTSEngine(private val context: Context) {
 
     private fun configurarVoz() {
         val vozes = tts?.voices ?: emptySet()
-
-        // Prioridade: voz feminina brasileira
-        val vozFeminina = vozes.firstOrNull { voz ->
-            voz.locale.language == "pt" &&
-            voz.locale.country == "BR" &&
-            (voz.name.contains("female", ignoreCase = true) ||
-             voz.name.contains("feminina", ignoreCase = true))
-        } ?: vozes.firstOrNull { voz ->
-            voz.locale.language == "pt" && voz.locale.country == "BR"
+        val vozFeminina = vozes.firstOrNull { v ->
+            v.locale.language == "pt" && v.locale.country == "BR" &&
+            (v.name.contains("female", ignoreCase = true) ||
+             v.name.contains("feminina", ignoreCase = true))
+        } ?: vozes.firstOrNull { v ->
+            v.locale.language == "pt" && v.locale.country == "BR"
         }
 
         if (vozFeminina != null) {
             tts?.voice = vozFeminina
-            Log.d(TAG, "Voz selecionada: ${vozFeminina.name}")
+            Log.d(TAG, "Voz: ${vozFeminina.name}")
         } else {
-            tts?.setLanguage(java.util.Locale("pt", "BR"))
+            tts?.setLanguage(Locale("pt", "BR"))
         }
 
-        // Tom feminino natural — não robótico
-        tts?.setPitch(1.1f)        // Levemente mais agudo (feminino)
-        tts?.setSpeechRate(1.0f)   // Velocidade natural
+        tts?.setPitch(1.1f)
+        tts?.setSpeechRate(1.0f)
     }
 
-    /**
-     * Fala o texto. Se priority=true, interrompe fala atual.
-     * onDone é chamado quando terminar de falar.
-     */
     fun speak(text: String, priority: Boolean = false, onDone: (() -> Unit)? = null) {
         if (!isReady) {
-            Log.w(TAG, "TTS não está pronto ainda")
+            Log.w(TAG, "TTS não pronto")
             onDone?.invoke()
             return
         }
 
         if (priority) {
             tts?.stop()
+            MicrophoneLock.unlock() // Resetar antes de nova fala
         }
 
         onDoneCallback = onDone
 
-        val utteranceId = "jarvis_${System.currentTimeMillis()}"
+        val uid = "natiele_${System.currentTimeMillis()}"
         val params = android.os.Bundle().apply {
-            putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
+            putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, uid)
         }
 
-        // Textos longos: dividir em sentenças para menor latência percebida
         if (text.length > 150) {
-            val sentencas = text.split(Regex("(?<=[.!?])\\s+")).filter { it.isNotBlank() }
-            sentencas.forEachIndexed { index, sentenca ->
-                val uid = "${utteranceId}_$index"
+            val sentences = text.split(Regex("(?<=[.!?])\\s+")).filter { it.isNotBlank() }
+            sentences.forEachIndexed { i, s ->
+                val id = "${uid}_$i"
                 val p = android.os.Bundle().apply {
-                    putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, uid)
+                    putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, id)
                 }
-                val modo = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-                tts?.speak(sentenca, modo, p, uid)
+                val mode = if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+                tts?.speak(s, mode, p, id)
             }
         } else {
-            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
+            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, uid)
         }
     }
 
     fun stopSpeaking() {
         tts?.stop()
+        MicrophoneLock.unlock()
         onDoneCallback = null
     }
 
-    fun isSpeaking(): Boolean {
-        return tts?.isSpeaking == true
-    }
+    fun isSpeaking(): Boolean = tts?.isSpeaking == true || MicrophoneLock.isLocked()
 
     fun shutdown() {
         tts?.stop()
         tts?.shutdown()
+        MicrophoneLock.unlock()
         tts = null
     }
 }
