@@ -87,9 +87,6 @@ dependencies {
     // Audio
     implementation 'com.github.paramsen:noise:2.0.0'
 
-    // Porcupine Wake Word
-    implementation 'ai.picovoice:porcupine-android:3.0.1'
-
     // WorkManager (background tasks)
     implementation 'androidx.work:work-runtime-ktx:2.9.0'
 

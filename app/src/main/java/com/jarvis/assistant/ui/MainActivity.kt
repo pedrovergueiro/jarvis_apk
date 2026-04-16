@@ -8,7 +8,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.view.View
+import android.view.animation.AnimationUtils
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -30,8 +30,7 @@ class MainActivity : AppCompatActivity() {
 
     private val requiredPermissions = mutableListOf(
         Manifest.permission.RECORD_AUDIO,
-        Manifest.permission.READ_CONTACTS,
-        Manifest.permission.READ_CALL_LOG
+        Manifest.permission.READ_CONTACTS
     ).apply {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             add(Manifest.permission.POST_NOTIFICATIONS)
@@ -40,27 +39,13 @@ class MainActivity : AppCompatActivity() {
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        val allGranted = permissions.values.all { it }
-        if (allGranted) {
-            startJarvisService()
-        } else {
-            Toast.makeText(this, "Algumas permissões foram negadas. Funcionalidades limitadas.", Toast.LENGTH_LONG).show()
-            startJarvisService() // Inicia mesmo assim com funcionalidades reduzidas
-        }
-    }
+    ) { _ -> startJarvisService() }
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
-                "com.jarvis.STATUS_UPDATE" -> {
-                    val status = intent.getStringExtra("status") ?: return
-                    updateStatus(status)
-                }
-                "com.jarvis.LOG_UPDATE" -> {
-                    val message = intent.getStringExtra("message") ?: return
-                    addLog(message)
-                }
+                "com.jarvis.STATUS_UPDATE" -> updateStatus(intent.getStringExtra("status") ?: return)
+                "com.jarvis.LOG_UPDATE" -> addLog(intent.getStringExtra("message") ?: return)
             }
         }
     }
@@ -73,32 +58,30 @@ class MainActivity : AppCompatActivity() {
         val app = application as JarvisApplication
         memoryManager = MemoryManager(app.database)
 
-        setupUI()
         setupRecyclerView()
+        setupClickListeners()
         loadRecentLogs()
         checkPermissionsAndStart()
     }
 
-    private fun setupUI() {
-        // Botão de ativação manual
+    private fun setupClickListeners() {
+        // Orb principal — ativa escuta manual
         binding.btnActivate.setOnClickListener {
-            if (JarvisService.isRunning) {
-                val intent = Intent(this, JarvisService::class.java).apply {
-                    action = JarvisService.ACTION_TOGGLE
-                }
-                startService(intent)
-            } else {
+            if (!JarvisService.isRunning) {
                 startJarvisService()
+                return@setOnClickListener
             }
+            val intent = Intent(this, JarvisService::class.java).apply {
+                action = JarvisService.ACTION_MANUAL_LISTEN
+            }
+            startService(intent)
+            // Feedback visual imediato
+            updateStatus("LISTENING")
         }
 
-        // Botão de configurações
         binding.btnSettings.setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
-
-        // Status inicial
-        updateStatus(if (JarvisService.isRunning) "ACTIVE" else "STOPPED")
     }
 
     private fun setupRecyclerView() {
@@ -113,12 +96,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadRecentLogs() {
         lifecycleScope.launch {
-            val commands = memoryManager.getRecentContext()
-            commands.forEach { (user, assistant) ->
+            memoryManager.getRecentContext().forEach { (user, assistant) ->
                 logAdapter.addLog("Você: $user")
-                logAdapter.addLog("Jarvis: $assistant")
+                if (assistant.isNotBlank()) logAdapter.addLog("Jarvis: $assistant")
             }
-            binding.rvLogs.scrollToPosition(logAdapter.itemCount - 1)
+            if (logAdapter.itemCount > 0) {
+                binding.rvLogs.scrollToPosition(logAdapter.itemCount - 1)
+            }
         }
     }
 
@@ -126,11 +110,8 @@ class MainActivity : AppCompatActivity() {
         val missing = requiredPermissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (missing.isEmpty()) {
-            startJarvisService()
-        } else {
-            permissionLauncher.launch(missing.toTypedArray())
-        }
+        if (missing.isEmpty()) startJarvisService()
+        else permissionLauncher.launch(missing.toTypedArray())
     }
 
     private fun startJarvisService() {
@@ -146,24 +127,27 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateStatus(status: String) {
         runOnUiThread {
-            val (text, color) = when (status) {
-                "ACTIVE" -> Pair("Aguardando wake word...", R.color.status_active)
-                "LISTENING" -> Pair("Ouvindo...", R.color.status_listening)
-                "PROCESSING" -> Pair("Processando...", R.color.status_processing)
-                "PAUSED" -> Pair("Pausado", R.color.status_paused)
-                "STOPPED" -> Pair("Inativo", R.color.status_stopped)
-                else -> Pair(status, R.color.status_active)
+            val (statusText, orbColor, label) = when (status) {
+                "ACTIVE"     -> Triple("Diga 'Jarvis' ou toque", 0xFF00BCD4.toInt(), "Toque")
+                "LISTENING"  -> Triple("Ouvindo...", 0xFF4CAF50.toInt(), "Ouvindo")
+                "PROCESSING" -> Triple("Processando...", 0xFFFF9800.toInt(), "...")
+                "SPEAKING"   -> Triple("Falando...", 0xFF9C27B0.toInt(), "Falando")
+                "PAUSED"     -> Triple("Pausado", 0xFF607D8B.toInt(), "Pausado")
+                "STOPPED"    -> Triple("Inativo — toque para iniciar", 0xFF455A64.toInt(), "Iniciar")
+                else         -> Triple(status, 0xFF00BCD4.toInt(), "Toque")
             }
-            binding.tvStatus.text = text
-            binding.statusIndicator.setBackgroundColor(ContextCompat.getColor(this, color))
-            binding.btnActivate.text = if (status == "PAUSED" || status == "STOPPED") "Ativar" else "Pausar"
+
+            binding.tvStatus.text = statusText
+            binding.tvOrbLabel.text = label
+            binding.btnActivate.setCardBackgroundColor(orbColor)
 
             // Animação de pulso quando ouvindo
-            if (status == "LISTENING") {
-                binding.statusIndicator.animate().scaleX(1.3f).scaleY(1.3f).setDuration(300)
-                    .withEndAction {
-                        binding.statusIndicator.animate().scaleX(1f).scaleY(1f).setDuration(300).start()
-                    }.start()
+            when (status) {
+                "LISTENING" -> {
+                    val pulse = AnimationUtils.loadAnimation(this, R.anim.pulse)
+                    binding.orbRing.startAnimation(pulse)
+                }
+                else -> binding.orbRing.clearAnimation()
             }
         }
     }
@@ -184,12 +168,15 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(statusReceiver, filter, RECEIVER_NOT_EXPORTED)
         } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(statusReceiver, filter)
         }
+        // Atualizar status ao voltar para o app
+        updateStatus(if (JarvisService.isRunning) "ACTIVE" else "STOPPED")
     }
 
     override fun onPause() {
         super.onPause()
-        try { unregisterReceiver(statusReceiver) } catch (e: Exception) {}
+        try { unregisterReceiver(statusReceiver) } catch (_: Exception) {}
     }
 }

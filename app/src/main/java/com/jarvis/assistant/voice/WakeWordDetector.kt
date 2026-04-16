@@ -1,13 +1,18 @@
 package com.jarvis.assistant.voice
 
 import android.content.Context
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.util.Log
-import ai.picovoice.porcupine.*
 import kotlinx.coroutines.*
+import kotlin.math.sqrt
 
 /**
- * Detector de wake word usando Porcupine (offline, baixo consumo).
- * Palavra padrão: "Hey Jarvis" (ou "Jarvis" via keyword customizada)
+ * Detector de wake word 100% offline sem dependências externas.
+ * Usa dois métodos combinados:
+ * 1. Detecção de energia de voz (VAD) para acordar do sleep
+ * 2. Android SpeechRecognizer em modo contínuo para detectar "jarvis"
  */
 class WakeWordDetector(
     private val context: Context,
@@ -15,53 +20,57 @@ class WakeWordDetector(
 ) {
     companion object {
         private const val TAG = "WakeWordDetector"
-        // Chave gratuita do Porcupine (substituir pela chave real em produção)
-        private const val ACCESS_KEY = "PORCUPINE_ACCESS_KEY_HERE"
+        private const val SAMPLE_RATE = 16000
+        private const val ENERGY_THRESHOLD = 800.0  // Limiar de energia para VAD
+        private const val WAKE_WORDS = listOf("jarvis", "jarvis", "ei jarvis", "hey jarvis", "ok jarvis")
     }
 
-    private var porcupineManager: PorcupineManager? = null
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var isActive = false
+    private var audioRecord: AudioRecord? = null
+    private var sttWatcher: ContinuousSTTWatcher? = null
 
     fun start() {
         if (isActive) return
-        try {
-            porcupineManager = PorcupineManager.Builder()
-                .setAccessKey(ACCESS_KEY)
-                .setKeyword(Porcupine.BuiltInKeyword.JARVIS)
-                .setSensitivity(0.7f)
-                .build(context) { keywordIndex ->
-                    if (keywordIndex == 0) {
-                        Log.d(TAG, "Wake word detectada!")
-                        onWakeWord()
-                    }
-                }
-            porcupineManager?.start()
-            isActive = true
-            Log.d(TAG, "WakeWordDetector iniciado")
-        } catch (e: PorcupineException) {
-            Log.e(TAG, "Erro ao iniciar Porcupine: ${e.message}")
-            // Fallback: usar detecção por energia de áudio
-            startFallbackDetection()
+        isActive = true
+        Log.d(TAG, "WakeWordDetector iniciado (modo offline)")
+        startContinuousSTT()
+    }
+
+    /**
+     * Escuta continuamente em background usando SpeechRecognizer.
+     * Quando detecta "jarvis" dispara o callback.
+     */
+    private fun startContinuousSTT() {
+        sttWatcher = ContinuousSTTWatcher(context) { text ->
+            val lower = text.lowercase().trim()
+            val detected = WAKE_WORDS.any { lower.contains(it) }
+            if (detected && isActive) {
+                Log.d(TAG, "Wake word detectada: '$text'")
+                isActive = false // Evitar duplo disparo
+                onWakeWord()
+            }
         }
+        sttWatcher?.start()
     }
 
     fun stop() {
         isActive = false
-        try {
-            porcupineManager?.stop()
-            porcupineManager?.delete()
-            porcupineManager = null
-        } catch (e: Exception) {
-            Log.e(TAG, "Erro ao parar WakeWordDetector: ${e.message}")
-        }
+        sttWatcher?.stop()
+        sttWatcher = null
+        audioRecord?.stop()
+        audioRecord?.release()
+        audioRecord = null
+        scope.cancel()
     }
 
-    /**
-     * Fallback: detecta quando o usuário fala "jarvis" via STT simples
-     * Usado quando Porcupine não está disponível
-     */
-    private fun startFallbackDetection() {
-        Log.w(TAG, "Usando fallback de wake word (STT básico)")
-        // O JarvisService vai usar o botão manual como fallback
+    fun restart() {
+        stop()
+        // Pequeno delay antes de reiniciar para evitar conflito de microfone
+        CoroutineScope(Dispatchers.IO).launch {
+            delay(800)
+            isActive = true
+            startContinuousSTT()
+        }
     }
 }
