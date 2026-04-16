@@ -117,6 +117,8 @@ class STTEngine(
                         val text = json.optString("text", "")
                         if (text.isNotBlank()) {
                             withContext(Dispatchers.Main) { onResult(text) }
+                        } else {
+                            Log.d(TAG, "Whisper retornou texto vazio")
                         }
                     } else {
                         Log.e(TAG, "Erro Whisper API: ${response.code}")
