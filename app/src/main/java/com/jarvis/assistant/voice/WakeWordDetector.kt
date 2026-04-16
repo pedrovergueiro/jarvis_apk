@@ -1,16 +1,23 @@
 package com.jarvis.assistant.voice
 
 import android.content.Context
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 /**
- * Detector de wake word 100% offline.
- * Reconhece "jarvis" em múltiplos sotaques e variações.
- * Após 5 minutos sem interação, volta ao modo de espera.
+ * Wake word detector usando AudioRecord puro — funciona com tela apagada.
+ * Fluxo: VAD detecta voz → grava chunk → envia para Whisper → checa "jarvis"
  */
 class WakeWordDetector(
     private val context: Context,
@@ -18,81 +25,133 @@ class WakeWordDetector(
 ) {
     companion object {
         private const val TAG = "WakeWordDetector"
-        private const val IDLE_TIMEOUT_MS = 5 * 60 * 1000L // 5 minutos
-
-        // Variações fonéticas de "Jarvis" para cobrir sotaques diferentes
+        private const val SAMPLE_RATE = 16000
+        private const val CHANNEL = AudioFormat.CHANNEL_IN_MONO
+        private const val FORMAT = AudioFormat.ENCODING_PCM_16BIT
+        private const val VAD_THRESHOLD = 600        // energia mínima para considerar voz
+        private const val CHUNK_DURATION_MS = 2500L  // grava 2.5s após detectar voz
         private val WAKE_WORDS = listOf(
             "jarvis", "jávis", "járvis", "jarves", "jarwis",
             "ei jarvis", "hey jarvis", "ok jarvis", "oi jarvis",
-            "e jarvis", "a jarvis", "o jarvis",
-            "jarvi", "jarbi", "zarvis", "harvis"
+            "jarvi", "jarbi", "zarvis", "harvis", "jarvis"
         )
     }
 
     private var isActive: Boolean = false
-    private var sttWatcher: ContinuousSTTWatcher? = null
-    private var lastInteractionTime: Long = System.currentTimeMillis()
-    private var idleCheckJob: kotlinx.coroutines.Job? = null
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var vadJob: Job? = null
+    private val whisperClient = WhisperClient(context)
 
     fun start() {
         if (isActive) return
         isActive = true
-        lastInteractionTime = System.currentTimeMillis()
-        Log.d(TAG, "WakeWordDetector iniciado")
-        startContinuousSTT()
-        startIdleCheck()
+        Log.d(TAG, "WakeWordDetector iniciado via AudioRecord")
+        startVADLoop()
     }
 
-    private fun startContinuousSTT() {
-        sttWatcher = ContinuousSTTWatcher(context) { text ->
-            val lower = text.lowercase().trim()
-            val found = WAKE_WORDS.any { lower.contains(it) }
-            if (found && isActive) {
-                Log.d(TAG, "Wake word detectada: '$text'")
-                isActive = false
-                lastInteractionTime = System.currentTimeMillis()
-                onWakeWord()
+    private fun startVADLoop() {
+        vadJob?.cancel()
+        vadJob = scope.launch {
+            val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL, FORMAT)
+            val audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                SAMPLE_RATE, CHANNEL, FORMAT,
+                bufferSize * 4
+            )
+
+            if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+                Log.e(TAG, "AudioRecord falhou ao inicializar")
+                return@launch
             }
-        }
-        sttWatcher?.start()
-    }
 
-    /**
-     * Verifica inatividade — após 5 min sem interação,
-     * o usuário precisa chamar "Jarvis" novamente.
-     */
-    private fun startIdleCheck() {
-        idleCheckJob?.cancel()
-        idleCheckJob = CoroutineScope(Dispatchers.IO).launch {
-            while (isActive) {
-                delay(30_000L) // checar a cada 30s
-                val elapsed = System.currentTimeMillis() - lastInteractionTime
-                if (elapsed >= IDLE_TIMEOUT_MS) {
-                    Log.d(TAG, "Timeout de inatividade — aguardando wake word")
-                    // Já está em modo wake word, só loga
+            audioRecord.startRecording()
+            val buffer = ShortArray(bufferSize)
+
+            try {
+                while (isActive && isActive) {
+                    val read = audioRecord.read(buffer, 0, bufferSize)
+                    if (read <= 0) continue
+
+                    // VAD: calcular energia RMS
+                    val rms = calculateRMS(buffer, read)
+
+                    if (rms > VAD_THRESHOLD) {
+                        // Voz detectada — gravar chunk completo
+                        Log.d(TAG, "Voz detectada (RMS=$rms), gravando...")
+                        audioRecord.stop()
+
+                        val audioData = recordChunk(CHUNK_DURATION_MS)
+                        if (audioData.isNotEmpty()) {
+                            val text = whisperClient.transcribe(audioData)
+                            Log.d(TAG, "Whisper ouviu: '$text'")
+                            val lower = text.lowercase().trim()
+                            val found = WAKE_WORDS.any { lower.contains(it) }
+                            if (found && isActive) {
+                                isActive = false
+                                Log.d(TAG, "Wake word detectada!")
+                                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                    onWakeWord()
+                                }
+                                return@launch
+                            }
+                        }
+
+                        // Reiniciar gravação
+                        audioRecord.startRecording()
+                    }
                 }
+            } finally {
+                audioRecord.stop()
+                audioRecord.release()
             }
         }
     }
 
-    fun recordInteraction() {
-        lastInteractionTime = System.currentTimeMillis()
+    private fun recordChunk(durationMs: Long): ShortArray {
+        val totalSamples = (SAMPLE_RATE * durationMs / 1000).toInt()
+        val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL, FORMAT)
+        val audioRecord = AudioRecord(
+            MediaRecorder.AudioSource.MIC,
+            SAMPLE_RATE, CHANNEL, FORMAT,
+            bufferSize * 4
+        )
+        val data = ShortArray(totalSamples)
+        var offset = 0
+        audioRecord.startRecording()
+        val buf = ShortArray(bufferSize)
+        while (offset < totalSamples) {
+            val read = audioRecord.read(buf, 0, minOf(bufferSize, totalSamples - offset))
+            if (read <= 0) break
+            buf.copyInto(data, offset, 0, read)
+            offset += read
+        }
+        audioRecord.stop()
+        audioRecord.release()
+        return data
+    }
+
+    private fun calculateRMS(buffer: ShortArray, length: Int): Double {
+        var sum = 0.0
+        for (i in 0 until length) {
+            sum += buffer[i].toDouble() * buffer[i].toDouble()
+        }
+        return Math.sqrt(sum / length)
     }
 
     fun stop() {
         isActive = false
-        idleCheckJob?.cancel()
-        sttWatcher?.stop()
-        sttWatcher = null
+        vadJob?.cancel()
+        scope.cancel()
     }
 
     fun restart() {
-        stop()
-        CoroutineScope(Dispatchers.Main).launch {
-            delay(800L)
+        isActive = false
+        vadJob?.cancel()
+        val newScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        newScope.launch {
+            delay(500L)
             isActive = true
-            startContinuousSTT()
-            startIdleCheck()
+            startVADLoop()
         }
     }
 }

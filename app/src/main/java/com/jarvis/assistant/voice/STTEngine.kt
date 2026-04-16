@@ -1,33 +1,23 @@
 package com.jarvis.assistant.voice
 
 import android.content.Context
-import android.content.Intent
-import android.os.Bundle
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.util.Log
-import com.jarvis.assistant.BuildConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import okhttp3.MultipartBody
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.MediaType.Companion.toMediaType
-import org.json.JSONObject
-import java.io.File
-import java.io.IOException
-import java.util.concurrent.TimeUnit
+import kotlin.math.sqrt
 
 /**
- * Motor STT para captura de comandos (não wake word).
- * Usa Android SpeechRecognizer como primário (baixa latência).
- * Fallback para Whisper via Groq se Android STT falhar.
+ * Captura comando de voz via AudioRecord + Whisper.
+ * Funciona em background, com tela apagada.
+ * VAD detecta fim da fala automaticamente.
  */
 class STTEngine(
     private val context: Context,
@@ -35,132 +25,108 @@ class STTEngine(
 ) {
     companion object {
         private const val TAG = "STTEngine"
-        private val GROQ_API_KEY get() = BuildConfig.GROQ_API_KEY
-        private const val GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+        private const val SAMPLE_RATE = 16000
+        private const val CHANNEL = AudioFormat.CHANNEL_IN_MONO
+        private const val FORMAT = AudioFormat.ENCODING_PCM_16BIT
+        private const val SILENCE_THRESHOLD = 400.0
+        private const val SILENCE_DURATION_MS = 1500L  // 1.5s de silêncio = fim da fala
+        private const val MAX_DURATION_MS = 8000L      // máximo 8s de gravação
+        private const val MIN_DURATION_MS = 500L       // mínimo 0.5s para processar
     }
 
-    private var speechRecognizer: SpeechRecognizer? = null
-    private var audioRecorder: ContinuousAudioRecorder? = null
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var recordJob: Job? = null
+    private var isRecording: Boolean = false
+    private val whisperClient = WhisperClient(context)
 
     fun startListening() {
-        if (SpeechRecognizer.isRecognitionAvailable(context)) {
-            startAndroidSTT()
-        } else {
-            startWhisperSTT()
-        }
-    }
+        if (isRecording) return
+        isRecording = true
+        Log.d(TAG, "Iniciando captura de comando")
 
-    private fun startAndroidSTT() {
-        speechRecognizer?.destroy()
-        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
-        speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {}
-            override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(rmsdB: Float) {}
-            override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {}
+        recordJob = scope.launch {
+            val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL, FORMAT)
+            val audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                SAMPLE_RATE, CHANNEL, FORMAT,
+                bufferSize * 4
+            )
 
-            override fun onError(error: Int) {
-                Log.e(TAG, "Erro STT Android: $error")
-                // Fallback para Whisper em erros de reconhecimento
-                if (error == SpeechRecognizer.ERROR_NO_MATCH ||
-                    error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
-                    startWhisperSTT()
-                } else {
-                    onResult("")
-                }
+            if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+                Log.e(TAG, "AudioRecord não inicializou")
+                withContext(Dispatchers.Main) { onResult("") }
+                return@launch
             }
 
-            override fun onResults(results: Bundle?) {
-                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                val text = matches?.firstOrNull() ?: ""
-                Log.d(TAG, "STT resultado: $text")
-                if (text.isNotBlank()) {
-                    onResult(text)
-                } else {
-                    onResult("")
-                }
-            }
+            audioRecord.startRecording()
+            val allData = mutableListOf<Short>()
+            val buffer = ShortArray(bufferSize)
+            val startTime = System.currentTimeMillis()
+            var silenceStart = 0L
+            var hasSpeech = false
 
-            override fun onPartialResults(partialResults: Bundle?) {}
-            override fun onEvent(eventType: Int, params: Bundle?) {}
-        })
-
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 500L)
-        }
-        speechRecognizer?.startListening(intent)
-    }
-
-    private fun startWhisperSTT() {
-        audioRecorder = ContinuousAudioRecorder(context)
-        audioRecorder?.startRecording { audioFile ->
-            transcribeWithWhisper(audioFile)
-        }
-    }
-
-    private fun transcribeWithWhisper(audioFile: File) {
-        scope.launch {
             try {
-                val requestBody = MultipartBody.Builder()
-                    .setType(MultipartBody.FORM)
-                    .addFormDataPart(
-                        "file", audioFile.name,
-                        audioFile.readBytes().toRequestBody("audio/wav".toMediaType())
-                    )
-                    .addFormDataPart("model", "whisper-large-v3-turbo")
-                    .addFormDataPart("language", "pt")
-                    .addFormDataPart("response_format", "json")
-                    .build()
+                while (isRecording) {
+                    val read = audioRecord.read(buffer, 0, bufferSize)
+                    if (read <= 0) continue
 
-                val request = Request.Builder()
-                    .url(GROQ_WHISPER_URL)
-                    .header("Authorization", "Bearer $GROQ_API_KEY")
-                    .post(requestBody)
-                    .build()
+                    allData.addAll(buffer.take(read))
 
-                httpClient.newCall(request).execute().use { response ->
-                    if (response.isSuccessful) {
-                        val json = JSONObject(response.body?.string() ?: "{}")
-                        val text = json.optString("text", "")
-                        withContext(Dispatchers.Main) {
-                            if (text.isNotBlank()) {
-                                onResult(text)
-                            } else {
-                                onResult("")
-                            }
+                    val rms = calculateRMS(buffer, read)
+                    val elapsed = System.currentTimeMillis() - startTime
+
+                    if (rms > SILENCE_THRESHOLD) {
+                        hasSpeech = true
+                        silenceStart = 0L
+                    } else if (hasSpeech) {
+                        if (silenceStart == 0L) silenceStart = System.currentTimeMillis()
+                        val silenceDuration = System.currentTimeMillis() - silenceStart
+                        if (silenceDuration >= SILENCE_DURATION_MS) {
+                            Log.d(TAG, "Silêncio detectado — fim da fala")
+                            break
                         }
-                    } else {
-                        Log.e(TAG, "Erro Whisper API: ${response.code}")
-                        withContext(Dispatchers.Main) { onResult("") }
+                    }
+
+                    if (elapsed >= MAX_DURATION_MS) {
+                        Log.d(TAG, "Timeout máximo de gravação")
+                        break
                     }
                 }
-            } catch (e: IOException) {
-                Log.e(TAG, "Erro de rede Whisper: ${e.message}")
-                withContext(Dispatchers.Main) { onResult("") }
             } finally {
-                audioFile.delete()
+                audioRecord.stop()
+                audioRecord.release()
+                isRecording = false
             }
+
+            val elapsed = System.currentTimeMillis() - startTime
+            if (elapsed < MIN_DURATION_MS || allData.isEmpty()) {
+                withContext(Dispatchers.Main) { onResult("") }
+                return@launch
+            }
+
+            // Transcrever com Whisper
+            Log.d(TAG, "Enviando ${allData.size} samples para Whisper")
+            val text = whisperClient.transcribe(allData.toShortArray())
+            Log.d(TAG, "Transcrição: '$text'")
+            withContext(Dispatchers.Main) { onResult(text) }
         }
     }
 
     fun stopListening() {
-        speechRecognizer?.stopListening()
-        audioRecorder?.stopRecording()
+        isRecording = false
+        recordJob?.cancel()
+    }
+
+    private fun calculateRMS(buffer: ShortArray, length: Int): Double {
+        var sum = 0.0
+        for (i in 0 until length) {
+            sum += buffer[i].toDouble() * buffer[i].toDouble()
+        }
+        return sqrt(sum / length)
     }
 
     fun destroy() {
-        speechRecognizer?.destroy()
-        audioRecorder?.stopRecording()
+        stopListening()
         scope.cancel()
     }
 }
