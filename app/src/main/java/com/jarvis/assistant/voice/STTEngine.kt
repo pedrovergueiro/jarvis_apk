@@ -7,6 +7,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
+import com.jarvis.assistant.BuildConfig
 import kotlinx.coroutines.*
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
@@ -15,18 +16,12 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 
-/**
- * Motor STT com dois modos:
- * 1. Android SpeechRecognizer (online, baixa latência)
- * 2. Whisper via API Groq (alta precisão, streaming)
- */
 class STTEngine(
     private val context: Context,
     private val onResult: (String) -> Unit
 ) {
     companion object {
         private const val TAG = "STTEngine"
-        // Groq API para Whisper Large V3 Turbo
         private const val GROQ_API_KEY = BuildConfig.GROQ_API_KEY
         private const val GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
     }
@@ -60,7 +55,6 @@ class STTEngine(
             override fun onEndOfSpeech() {}
             override fun onError(error: Int) {
                 Log.e(TAG, "Erro STT: $error")
-                // Fallback para Whisper se Android STT falhar
                 if (error == SpeechRecognizer.ERROR_NO_MATCH ||
                     error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
                     startWhisperSTT()
@@ -73,7 +67,6 @@ class STTEngine(
                 onResult(text)
             }
             override fun onPartialResults(partialResults: Bundle?) {
-                // Resultados parciais para feedback em tempo real
                 val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 Log.d(TAG, "Parcial: ${partial?.firstOrNull()}")
             }
@@ -91,10 +84,6 @@ class STTEngine(
         speechRecognizer?.startListening(intent)
     }
 
-    /**
-     * Whisper Large V3 Turbo via Groq API
-     * Grava áudio por 5 segundos e envia para transcrição
-     */
     private fun startWhisperSTT() {
         audioRecorder = ContinuousAudioRecorder(context)
         audioRecorder?.startRecording { audioFile ->
