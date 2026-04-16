@@ -26,7 +26,7 @@ class AIEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "AIEngine"
-        private const val GROQ_API_KEY = BuildConfig.GROQ_API_KEY
+        private val GROQ_API_KEY get() = BuildConfig.GROQ_API_KEY
         private const val GROQ_BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
 
         // Modelos disponíveis via Groq (ordenados por custo/velocidade)

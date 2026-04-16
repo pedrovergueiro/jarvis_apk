@@ -26,7 +26,7 @@ class TTSEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "TTSEngine"
-        private const val GROQ_API_KEY = BuildConfig.GROQ_API_KEY
+        private val GROQ_API_KEY get() = BuildConfig.GROQ_API_KEY
     }
 
     private var androidTTS: TextToSpeech? = null

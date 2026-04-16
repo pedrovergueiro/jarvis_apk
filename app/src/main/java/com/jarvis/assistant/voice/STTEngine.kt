@@ -22,7 +22,7 @@ class STTEngine(
 ) {
     companion object {
         private const val TAG = "STTEngine"
-        private const val GROQ_API_KEY = BuildConfig.GROQ_API_KEY
+        private val GROQ_API_KEY get() = BuildConfig.GROQ_API_KEY
         private const val GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
     }
 

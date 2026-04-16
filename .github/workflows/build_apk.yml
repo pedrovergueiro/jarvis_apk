@@ -41,7 +41,7 @@ jobs:
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}" >> local.properties
 
-          ./gradlew assembleDebug --stacktrace
+          ./gradlew generateDebugBuildConfig assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
