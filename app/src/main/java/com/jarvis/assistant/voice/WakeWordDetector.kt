@@ -2,7 +2,10 @@ package com.jarvis.assistant.voice
 
 import android.content.Context
 import android.util.Log
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class WakeWordDetector(
     private val context: Context,
@@ -13,7 +16,8 @@ class WakeWordDetector(
         private val WAKE_WORDS = listOf("jarvis", "ei jarvis", "hey jarvis", "ok jarvis")
     }
 
-    private var isActive = false
+    // var para permitir reatribuição
+    private var isActive: Boolean = false
     private var sttWatcher: ContinuousSTTWatcher? = null
 
     fun start() {
@@ -26,8 +30,8 @@ class WakeWordDetector(
     private fun startContinuousSTT() {
         sttWatcher = ContinuousSTTWatcher(context) { text ->
             val lower = text.lowercase().trim()
-            val detected = WAKE_WORDS.any { lower.contains(it) }
-            if (detected && isActive) {
+            val found = WAKE_WORDS.any { lower.contains(it) }
+            if (found && isActive) {
                 Log.d(TAG, "Wake word detectada: '$text'")
                 isActive = false
                 onWakeWord()
@@ -45,7 +49,7 @@ class WakeWordDetector(
     fun restart() {
         stop()
         CoroutineScope(Dispatchers.Main).launch {
-            delay(800)
+            delay(800L)
             isActive = true
             startContinuousSTT()
         }
