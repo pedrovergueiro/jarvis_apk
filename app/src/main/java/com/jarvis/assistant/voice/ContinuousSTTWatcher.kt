@@ -11,8 +11,8 @@ import android.speech.SpeechRecognizer
 import android.util.Log
 
 /**
- * SpeechRecognizer em modo contínuo para detecção de wake word.
- * Reinicia automaticamente após cada resultado ou timeout.
+ * SpeechRecognizer contínuo para wake word e comandos.
+ * Reinicia automaticamente após cada resultado.
  */
 class ContinuousSTTWatcher(
     private val context: Context,
@@ -20,12 +20,13 @@ class ContinuousSTTWatcher(
 ) {
     companion object {
         private const val TAG = "ContinuousSTTWatcher"
-        private const val RESTART_DELAY_MS = 500L
+        private const val RESTART_DELAY_MS = 400L
+        private const val ERROR_RESTART_DELAY_MS = 1000L
     }
 
     private var recognizer: SpeechRecognizer? = null
     private val handler = Handler(Looper.getMainLooper())
-    private var isRunning = false
+    private var isRunning: Boolean = false
 
     fun start() {
         isRunning = true
@@ -52,9 +53,8 @@ class ContinuousSTTWatcher(
                 override fun onEndOfSpeech() {}
 
                 override fun onError(error: Int) {
-                    // Reiniciar em qualquer erro (timeout, sem match, etc.)
                     if (isRunning) {
-                        handler.postDelayed({ startListening() }, RESTART_DELAY_MS)
+                        handler.postDelayed({ startListening() }, ERROR_RESTART_DELAY_MS)
                     }
                 }
 
@@ -65,7 +65,6 @@ class ContinuousSTTWatcher(
                         Log.d(TAG, "Ouviu: $text")
                         onText(text)
                     }
-                    // Reiniciar para continuar ouvindo
                     if (isRunning) {
                         handler.postDelayed({ startListening() }, RESTART_DELAY_MS)
                     }
@@ -86,10 +85,12 @@ class ContinuousSTTWatcher(
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
+                // Aceitar múltiplos idiomas para cobrir sotaques
+                putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 500L)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300L)
             }
 
             recognizer?.startListening(intent)
@@ -97,7 +98,7 @@ class ContinuousSTTWatcher(
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao iniciar STT: ${e.message}")
             if (isRunning) {
-                handler.postDelayed({ startListening() }, 2000L)
+                handler.postDelayed({ startListening() }, ERROR_RESTART_DELAY_MS * 2)
             }
         }
     }
@@ -105,8 +106,12 @@ class ContinuousSTTWatcher(
     fun stop() {
         isRunning = false
         handler.removeCallbacksAndMessages(null)
-        recognizer?.stopListening()
-        recognizer?.destroy()
+        try {
+            recognizer?.stopListening()
+            recognizer?.destroy()
+        } catch (e: Exception) {
+            Log.e(TAG, "Erro ao parar: ${e.message}")
+        }
         recognizer = null
     }
 }

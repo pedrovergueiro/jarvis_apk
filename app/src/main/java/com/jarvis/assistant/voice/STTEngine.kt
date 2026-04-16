@@ -8,14 +8,27 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
 import com.jarvis.assistant.BuildConfig
-import kotlinx.coroutines.*
-import okhttp3.*
-import okhttp3.MediaType.Companion.toMediaType
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaType
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 
+/**
+ * Motor STT para captura de comandos (não wake word).
+ * Usa Android SpeechRecognizer como primário (baixa latência).
+ * Fallback para Whisper via Groq se Android STT falhar.
+ */
 class STTEngine(
     private val context: Context,
     private val onResult: (String) -> Unit
@@ -29,8 +42,8 @@ class STTEngine(
     private var speechRecognizer: SpeechRecognizer? = null
     private var audioRecorder: ContinuousAudioRecorder? = null
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-        .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
         .build()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -46,40 +59,44 @@ class STTEngine(
         speechRecognizer?.destroy()
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
         speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {
-                Log.d(TAG, "Pronto para ouvir")
-            }
+            override fun onReadyForSpeech(params: Bundle?) {}
             override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() {}
+
             override fun onError(error: Int) {
-                Log.e(TAG, "Erro STT: $error")
+                Log.e(TAG, "Erro STT Android: $error")
+                // Fallback para Whisper em erros de reconhecimento
                 if (error == SpeechRecognizer.ERROR_NO_MATCH ||
                     error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
                     startWhisperSTT()
+                } else {
+                    onResult("")
                 }
             }
+
             override fun onResults(results: Bundle?) {
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                val text = matches?.firstOrNull() ?: return
+                val text = matches?.firstOrNull() ?: ""
                 Log.d(TAG, "STT resultado: $text")
-                onResult(text)
+                if (text.isNotBlank()) {
+                    onResult(text)
+                } else {
+                    onResult("")
+                }
             }
-            override fun onPartialResults(partialResults: Bundle?) {
-                val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                Log.d(TAG, "Parcial: ${partial?.firstOrNull()}")
-            }
+
+            override fun onPartialResults(partialResults: Bundle?) {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 500L)
         }
         speechRecognizer?.startListening(intent)
     }
@@ -113,19 +130,23 @@ class STTEngine(
 
                 httpClient.newCall(request).execute().use { response ->
                     if (response.isSuccessful) {
-                        val json = JSONObject(response.body?.string() ?: "")
+                        val json = JSONObject(response.body?.string() ?: "{}")
                         val text = json.optString("text", "")
-                        if (text.isNotBlank()) {
-                            withContext(Dispatchers.Main) { onResult(text) }
-                        } else {
-                            Log.d(TAG, "Whisper retornou texto vazio")
+                        withContext(Dispatchers.Main) {
+                            if (text.isNotBlank()) {
+                                onResult(text)
+                            } else {
+                                onResult("")
+                            }
                         }
                     } else {
                         Log.e(TAG, "Erro Whisper API: ${response.code}")
+                        withContext(Dispatchers.Main) { onResult("") }
                     }
                 }
             } catch (e: IOException) {
                 Log.e(TAG, "Erro de rede Whisper: ${e.message}")
+                withContext(Dispatchers.Main) { onResult("") }
             } finally {
                 audioFile.delete()
             }

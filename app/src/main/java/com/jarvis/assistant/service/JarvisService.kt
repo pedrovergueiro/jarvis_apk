@@ -17,7 +17,13 @@ import com.jarvis.assistant.ui.MainActivity
 import com.jarvis.assistant.voice.STTEngine
 import com.jarvis.assistant.voice.TTSEngine
 import com.jarvis.assistant.voice.WakeWordDetector
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class JarvisService : Service() {
 
@@ -26,8 +32,10 @@ class JarvisService : Service() {
         const val ACTION_STOP = "com.jarvis.STOP"
         const val ACTION_TOGGLE = "com.jarvis.TOGGLE"
         const val ACTION_MANUAL_LISTEN = "com.jarvis.MANUAL_LISTEN"
-        var isRunning = false
+        var isRunning: Boolean = false
         private const val TAG = "JarvisService"
+        private const val IDLE_TIMEOUT_MS = 5 * 60 * 1000L // 5 minutos
+        private const val LISTEN_TIMEOUT_MS = 8000L         // 8s para ouvir comando
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -40,7 +48,10 @@ class JarvisService : Service() {
     private lateinit var memoryManager: MemoryManager
     private lateinit var wakeLock: PowerManager.WakeLock
 
-    private var state = State.IDLE
+    private var state: State = State.IDLE
+    private var lastInteractionTime: Long = 0L
+    private var listenTimeoutJob: Job? = null
+    private var idleTimeoutJob: Job? = null
 
     enum class State { IDLE, WAKE_WORD, LISTENING, PROCESSING, SPEAKING, PAUSED }
 
@@ -58,8 +69,14 @@ class JarvisService : Service() {
         intentRouter = IntentRouter(this, memoryManager)
 
         sttEngine = STTEngine(this) { transcription ->
-            if (transcription.isNotBlank() && state == State.LISTENING) {
+            listenTimeoutJob?.cancel()
+            if (state == State.LISTENING && transcription.isNotBlank()) {
                 handleVoiceInput(transcription)
+            } else if (state == State.LISTENING) {
+                // Nada ouvido — voltar a aguardar
+                speak("Não ouvi nada. Pode repetir?") {
+                    goToListeningMode() // Continua ouvindo sem precisar chamar Jarvis de novo
+                }
             }
         }
 
@@ -73,46 +90,72 @@ class JarvisService : Service() {
     private fun acquireWakeLock() {
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "JarvisService::WakeLock")
-        wakeLock.acquire(60 * 60 * 1000L) // 1 hora, renovado
+        wakeLock.acquire(60 * 60 * 1000L)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> stopSelf()
             ACTION_TOGGLE -> togglePause()
-            ACTION_MANUAL_LISTEN -> onWakeWordDetected()
+            ACTION_MANUAL_LISTEN -> {
+                if (state == State.WAKE_WORD || state == State.IDLE) {
+                    onWakeWordDetected()
+                }
+            }
             else -> {
-                startForeground(JarvisApplication.NOTIFICATION_ID, buildNotification("Aguardando..."))
-                isRunning = true
-                goToWakeWordMode()
+                if (!isRunning) {
+                    startForeground(JarvisApplication.NOTIFICATION_ID, buildNotification("Iniciando..."))
+                    isRunning = true
+                    goToWakeWordMode()
+                }
             }
         }
         return START_STICKY
     }
 
-    // ─── Estados ──────────────────────────────────────────────────────────────
+    // ─── Máquina de estados ───────────────────────────────────────────────────
 
     private fun goToWakeWordMode() {
         if (state == State.PAUSED) return
         state = State.WAKE_WORD
+        listenTimeoutJob?.cancel()
+        idleTimeoutJob?.cancel()
         updateNotification("Diga 'Jarvis' para ativar")
         broadcastStatus("ACTIVE")
         wakeWordDetector.restart()
+        startIdleTimeout()
     }
 
     private fun onWakeWordDetected() {
-        if (state == State.PROCESSING || state == State.SPEAKING) return
         state = State.LISTENING
         wakeWordDetector.stop()
+        idleTimeoutJob?.cancel()
+        lastInteractionTime = System.currentTimeMillis()
         updateNotification("Ouvindo...")
         broadcastStatus("LISTENING")
 
-        // Falar "Sim?" e depois ouvir
-        ttsEngine.speak("Sim?", priority = true)
-        // Aguardar TTS terminar antes de ouvir (evita capturar o próprio "Sim?")
-        serviceScope.launch {
-            delay(600)
-            sttEngine.startListening()
+        // Resposta de ativação curta e natural
+        val greetings = listOf("Sim?", "Pois não?", "Diga.", "Pode falar.", "Estou ouvindo.")
+        val greeting = greetings.random()
+
+        ttsEngine.speak(greeting, priority = true) {
+            // Só começa a ouvir DEPOIS que terminar de falar
+            goToListeningMode()
+        }
+    }
+
+    private fun goToListeningMode() {
+        if (state != State.LISTENING) return
+        sttEngine.startListening()
+
+        // Timeout de escuta — se não ouvir nada em 8s, volta ao wake word
+        listenTimeoutJob?.cancel()
+        listenTimeoutJob = serviceScope.launch {
+            delay(LISTEN_TIMEOUT_MS)
+            if (state == State.LISTENING) {
+                sttEngine.stopListening()
+                goToWakeWordMode()
+            }
         }
     }
 
@@ -120,6 +163,7 @@ class JarvisService : Service() {
         if (state != State.LISTENING) return
         state = State.PROCESSING
         sttEngine.stopListening()
+        lastInteractionTime = System.currentTimeMillis()
         updateNotification("Processando...")
         broadcastStatus("PROCESSING")
         broadcastLog("Você: $text")
@@ -130,44 +174,82 @@ class JarvisService : Service() {
                 memoryManager.saveCommand(text)
                 memoryManager.extractAndSavePreferences(text)
 
-                // Tentar roteamento direto primeiro (offline, rápido)
+                // Roteamento direto (offline, instantâneo)
                 val detectedIntent = intentRouter.route(text)
-                val response = if (detectedIntent != null) {
+                val response: String = if (detectedIntent != null) {
                     intentRouter.execute(detectedIntent, text)
                 } else {
-                    // IA para respostas complexas
-                    val context = memoryManager.getRecentContext()
-                    aiEngine.chat(text, context)
+                    // IA com contexto do usuário
+                    val history = memoryManager.getRecentContext()
+                    val userContext = buildUserContext()
+                    aiEngine.chat(text, history, userContext)
                 }
 
                 memoryManager.saveResponse(text, response)
                 broadcastLog("Jarvis: $response")
-                speak(response)
+
+                // Após responder, continua ouvindo por mais 30s sem precisar chamar "Jarvis"
+                speak(response) {
+                    startPostResponseListening()
+                }
 
             } catch (e: Exception) {
                 Log.e(TAG, "Erro ao processar: ${e.message}")
-                speak("Desculpe, ocorreu um erro. Pode repetir?")
+                speak("Desculpe, ocorreu um erro. Pode repetir?") {
+                    goToListeningMode()
+                }
             }
         }
     }
 
-    private fun speak(text: String) {
-        state = State.SPEAKING
-        updateNotification("Falando...")
-        broadcastStatus("SPEAKING")
-        ttsEngine.speak(text)
+    /**
+     * Após responder, fica ouvindo por 30s para perguntas de follow-up.
+     * Não precisa chamar "Jarvis" de novo nesse período.
+     */
+    private fun startPostResponseListening() {
+        state = State.LISTENING
+        updateNotification("Ouvindo... (pode continuar)")
+        broadcastStatus("LISTENING")
+        sttEngine.startListening()
 
-        // Voltar a ouvir wake word após falar
-        // Estima duração da fala: ~100ms por palavra
-        val wordCount = text.split(" ").size
-        val estimatedMs = (wordCount * 120L).coerceIn(1000L, 8000L)
-
-        serviceScope.launch {
-            delay(estimatedMs)
-            if (state == State.SPEAKING) {
+        listenTimeoutJob?.cancel()
+        listenTimeoutJob = serviceScope.launch {
+            delay(30_000L) // 30s de janela para follow-up
+            if (state == State.LISTENING) {
+                sttEngine.stopListening()
                 goToWakeWordMode()
             }
         }
+    }
+
+    /**
+     * Timeout de inatividade — após 5 min sem interação,
+     * exige chamar "Jarvis" novamente.
+     */
+    private fun startIdleTimeout() {
+        idleTimeoutJob?.cancel()
+        idleTimeoutJob = serviceScope.launch {
+            delay(IDLE_TIMEOUT_MS)
+            if (state == State.WAKE_WORD) {
+                Log.d(TAG, "Timeout de inatividade")
+                updateNotification("Diga 'Jarvis' para ativar")
+            }
+        }
+    }
+
+    private fun speak(text: String, onDone: (() -> Unit)? = null) {
+        state = State.SPEAKING
+        updateNotification("Falando...")
+        broadcastStatus("SPEAKING")
+        ttsEngine.speak(text, priority = true) {
+            onDone?.invoke()
+        }
+    }
+
+    private suspend fun buildUserContext(): String {
+        val memories = memoryManager.getAllMemories()
+        if (memories.isEmpty()) return ""
+        return memories.take(10).joinToString("\n") { "${it.key}: ${it.value}" }
     }
 
     private fun togglePause() {
@@ -178,6 +260,8 @@ class JarvisService : Service() {
             wakeWordDetector.stop()
             sttEngine.stopListening()
             ttsEngine.stopSpeaking()
+            listenTimeoutJob?.cancel()
+            idleTimeoutJob?.cancel()
             updateNotification("Pausado — toque para retomar")
             broadcastStatus("PAUSED")
         }
@@ -191,16 +275,18 @@ class JarvisService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val toggleIntent = PendingIntent.getService(
-            this, 1,
-            Intent(this, JarvisService::class.java).apply { action = ACTION_TOGGLE },
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
         val listenIntent = PendingIntent.getService(
-            this, 2,
+            this, 1,
             Intent(this, JarvisService::class.java).apply { action = ACTION_MANUAL_LISTEN },
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val toggleIntent = PendingIntent.getService(
+            this, 2,
+            Intent(this, JarvisService::class.java).apply { action = ACTION_TOGGLE },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val pauseLabel = if (state == State.PAUSED) "Retomar" else "Pausar"
 
         return NotificationCompat.Builder(this, JarvisApplication.NOTIFICATION_CHANNEL_ID)
             .setContentTitle("Jarvis")
@@ -208,7 +294,7 @@ class JarvisService : Service() {
             .setSmallIcon(R.drawable.ic_jarvis)
             .setContentIntent(openIntent)
             .addAction(R.drawable.ic_mic, "Ouvir", listenIntent)
-            .addAction(R.drawable.ic_pause, if (state == State.PAUSED) "Retomar" else "Pausar", toggleIntent)
+            .addAction(R.drawable.ic_pause, pauseLabel, toggleIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setSilent(true)
