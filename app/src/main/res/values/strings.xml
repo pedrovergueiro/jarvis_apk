@@ -1,7 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Jarvis Assistant</string>
-    <string name="accessibility_description">Jarvis usa acessibilidade para automatizar ações em apps</string>
+    <string name="app_name">Natiele</string>
+    <string name="accessibility_description">Natiele usa acessibilidade para automatizar ações em apps</string>
+
+    <!-- Arrays para configurações -->
+    <string-array name="tts_speed_entries">
+        <item>Lento (0.8x)</item>
+        <item>Normal (1.0x)</item>
+        <item>Rápido (1.1x)</item>
+    </string-array>
+    <string-array name="tts_speed_values">
+        <item>0.8</item>
+        <item>1.0</item>
+        <item>1.1</item>
+    </string-array>
 
     <string-array name="tts_speed_entries">
         <item>Lento (0.8x)</item>

@@ -15,7 +15,7 @@ class JarvisApplication : Application() {
             private set
 
         const val NOTIFICATION_CHANNEL_ID = "jarvis_service"
-        const val NOTIFICATION_CHANNEL_NAME = "Jarvis Assistant"
+        const val NOTIFICATION_CHANNEL_NAME = "Natiele Assistant"
         const val NOTIFICATION_ID = 1001
     }
 
@@ -44,7 +44,7 @@ class JarvisApplication : Application() {
                 NOTIFICATION_CHANNEL_NAME,
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Jarvis rodando em segundo plano"
+                description = "Natiele rodando em segundo plano"
                 setShowBadge(false)
             }
             val manager = getSystemService(NotificationManager::class.java)

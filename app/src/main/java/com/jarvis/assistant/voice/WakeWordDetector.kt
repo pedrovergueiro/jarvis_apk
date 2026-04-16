@@ -32,9 +32,9 @@ class WakeWordDetector(
         private const val VAD_THRESHOLD = 600.0
         private const val CHUNK_DURATION_MS = 2500L
         private val WAKE_WORDS = listOf(
-            "jarvis", "jávis", "járvis", "jarves", "jarwis",
-            "ei jarvis", "hey jarvis", "ok jarvis", "oi jarvis",
-            "jarvi", "jarbi", "zarvis", "harvis"
+            "natiele", "natiéle", "natiele", "nati", "natiely",
+            "ei natiele", "hey natiele", "ok natiele", "oi natiele",
+            "nathiele", "natieli", "natele", "natiéli"
         )
     }
 

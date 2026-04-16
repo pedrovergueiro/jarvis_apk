@@ -25,12 +25,28 @@ class AIEngine(private val context: Context) {
         private const val MODEL = "llama-3.3-70b-versatile"
         private const val MODEL_FALLBACK = "llama-3.1-8b-instant"
 
-        private const val SYSTEM_PROMPT = """Você é Jarvis, assistente pessoal de IA rodando em um smartphone Android.
-Personalidade: direto, inteligente, levemente sarcástico quando apropriado, como o Jarvis do Tony Stark.
-Idioma: sempre português brasileiro, natural e fluido.
-Respostas curtas para comandos simples (1-2 frases). Detalhado apenas quando perguntado.
-Você tem memória das interações anteriores e conhece o usuário pelo histórico.
-Quando executar ações no dispositivo, confirme brevemente o que fez."""
+        private const val SYSTEM_PROMPT = """Você é Natiele, assistente pessoal de IA rodando em um smartphone Android.
+
+PERSONALIDADE:
+- Direta, inteligente, confiante — como uma assistente executiva de alto nível
+- Tom natural, humano, sem ser robótica
+- Levemente sarcástica quando apropriado
+- Nunca prolixo — vai direto ao ponto
+
+REGRAS DE RESPOSTA:
+- Respostas CURTAS: máximo 2 frases para perguntas simples
+- Só detalha quando explicitamente pedido ("explica", "detalha", "como funciona")
+- Nunca repete o que o usuário disse
+- Nunca começa com "Claro!", "Certamente!", "Com prazer!" — vai direto
+- Para ações executadas: confirma em 1 frase ("Feito.", "Abrindo.", "Pronto.")
+- Para perguntas de fato: responde o fato, ponto final
+- Para conversas: responde naturalmente, sem enrolação
+
+CONTEXTO:
+- Você roda no celular Android do usuário
+- Você tem acesso a apps, notificações, contatos, calendário
+- Você também tem uma versão desktop (PC) que compartilha memória com você
+- Idioma: sempre português brasileiro"""
     }
 
     private val httpClient = OkHttpClient.Builder()
@@ -42,19 +58,18 @@ Quando executar ações no dispositivo, confirme brevemente o que fez."""
     private val responseCache = LinkedHashMap<String, String>(50, 0.75f, true)
 
     private val offlineMap: Map<List<String>, () -> String> = mapOf(
-        listOf("hora", "horas", "que horas") to {
+        listOf("que horas", "hora agora", "horas são") to {
             val fmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale("pt", "BR"))
-            "São ${fmt.format(java.util.Date())}."
+            fmt.format(java.util.Date())
         },
-        listOf("data", "dia de hoje", "que dia") to {
-            val fmt = java.text.SimpleDateFormat("EEEE, dd 'de' MMMM 'de' yyyy", java.util.Locale("pt", "BR"))
-            "Hoje é ${fmt.format(java.util.Date())}."
+        listOf("que dia", "data hoje", "dia é hoje") to {
+            val fmt = java.text.SimpleDateFormat("EEEE, dd/MM/yyyy", java.util.Locale("pt", "BR"))
+            fmt.format(java.util.Date())
         },
-        listOf("olá", "oi", "e aí", "tudo bem", "como vai") to {
-            "Tudo funcionando perfeitamente. O que precisa?"
-        },
-        listOf("obrigado", "valeu", "brigado") to {
-            "Disponha."
+        listOf("olá", "oi natiele", "e aí", "tudo bem") to { "Tudo certo. O que precisa?" },
+        listOf("obrigado", "valeu", "brigado") to { "Disponha." },
+        listOf("status", "como você está", "tudo funcionando") to {
+            "Online e funcionando. Memória e IA ativas."
         }
     )
 
@@ -69,7 +84,7 @@ Quando executar ações no dispositivo, confirme brevemente o que fez."""
         val cacheKey = userMessage.lowercase().trim()
         responseCache[cacheKey]?.let { return it }
 
-        if (!isOnline()) return "Sem conexão no momento. Posso ajudar com hora, data e comandos básicos."
+        if (!isOnline()) return "Sem conexão. Posso ajudar com hora, data e comandos locais."
 
         return try {
             val response = callGroq(userMessage, history, MODEL, userContext)
@@ -81,7 +96,7 @@ Quando executar ações no dispositivo, confirme brevemente o que fez."""
                 callGroq(userMessage, history, MODEL_FALLBACK, userContext)
             } catch (e2: Exception) {
                 Log.e(TAG, "Erro fallback: ${e2.message}")
-                "Não consegui processar sua solicitação. Tente novamente."
+                "Não consegui processar. Tente novamente."
             }
         }
     }
@@ -93,7 +108,7 @@ Quando executar ações no dispositivo, confirme brevemente o que fez."""
         userContext: String
     ): String = withContext(Dispatchers.IO) {
         val systemContent = if (userContext.isNotBlank()) {
-            "$SYSTEM_PROMPT\n\nContexto do usuário:\n$userContext"
+            "$SYSTEM_PROMPT\n\nMemória do usuário:\n$userContext"
         } else {
             SYSTEM_PROMPT
         }
@@ -116,8 +131,8 @@ Quando executar ações no dispositivo, confirme brevemente o que fez."""
         val body = JSONObject().apply {
             put("model", model)
             put("messages", messages)
-            put("max_tokens", 400)
-            put("temperature", 0.75)
+            put("max_tokens", 200)   // Forçar respostas curtas
+            put("temperature", 0.7)
             put("stream", false)
         }
 

@@ -52,28 +52,28 @@ class TTSEngine(private val context: Context) {
     }
 
     private fun configurarVoz() {
-        // Tentar voz masculina brasileira
         val vozes = tts?.voices ?: emptySet()
 
-        val vozMasculina = vozes.firstOrNull { voz ->
+        // Prioridade: voz feminina brasileira
+        val vozFeminina = vozes.firstOrNull { voz ->
             voz.locale.language == "pt" &&
             voz.locale.country == "BR" &&
-            voz.name.contains("male", ignoreCase = true) &&
-            !voz.name.contains("female", ignoreCase = true)
+            (voz.name.contains("female", ignoreCase = true) ||
+             voz.name.contains("feminina", ignoreCase = true))
         } ?: vozes.firstOrNull { voz ->
             voz.locale.language == "pt" && voz.locale.country == "BR"
         }
 
-        if (vozMasculina != null) {
-            tts?.voice = vozMasculina
-            Log.d(TAG, "Voz selecionada: ${vozMasculina.name}")
+        if (vozFeminina != null) {
+            tts?.voice = vozFeminina
+            Log.d(TAG, "Voz selecionada: ${vozFeminina.name}")
         } else {
-            tts?.setLanguage(Locale("pt", "BR"))
+            tts?.setLanguage(java.util.Locale("pt", "BR"))
         }
 
-        // Tom mais grave e velocidade natural — menos robótico
-        tts?.setPitch(0.85f)       // Mais grave (masculino)
-        tts?.setSpeechRate(0.95f)  // Ligeiramente mais lento = mais natural
+        // Tom feminino natural — não robótico
+        tts?.setPitch(1.1f)        // Levemente mais agudo (feminino)
+        tts?.setSpeechRate(1.0f)   // Velocidade natural
     }
 
     /**
