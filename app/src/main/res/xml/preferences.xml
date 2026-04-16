@@ -1,20 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto">
-
-    <PreferenceCategory android:title="Inteligência Artificial">
-        <ListPreference
-            android:key="ai_model"
-            android:title="Modelo de IA"
-            android:summary="Selecione o modelo padrão"
-            android:defaultValue="auto" />
-
-        <SwitchPreferenceCompat
-            android:key="offline_mode"
-            android:title="Modo Offline"
-            android:summary="Usar apenas respostas locais"
-            android:defaultValue="false" />
-    </PreferenceCategory>
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
 
     <PreferenceCategory android:title="Voz">
         <SwitchPreferenceCompat
@@ -28,7 +13,7 @@
             android:title="Velocidade da Voz"
             android:entries="@array/tts_speed_entries"
             android:entryValues="@array/tts_speed_values"
-            android:defaultValue="1.1" />
+            android:defaultValue="0.95" />
     </PreferenceCategory>
 
     <PreferenceCategory android:title="Permissões">

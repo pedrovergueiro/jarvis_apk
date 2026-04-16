@@ -1,9 +1,9 @@
 package com.jarvis.assistant.voice
 
-import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -12,12 +12,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.sqrt
 
 /**
  * Captura comando de voz via AudioRecord + Whisper.
- * Funciona em background, com tela apagada.
- * VAD detecta fim da fala automaticamente.
+ * VAD com múltipla confirmação de silêncio — só para quando tem certeza
+ * que o usuário terminou de falar.
  */
 class STTEngine(
     private val context: Context,
@@ -27,100 +28,128 @@ class STTEngine(
         private const val TAG = "STTEngine"
         private const val SAMPLE_RATE = 16000
         private const val CHANNEL = AudioFormat.CHANNEL_IN_MONO
-        private const val FORMAT = AudioFormat.ENCODING_PCM_16BIT
-        private const val SILENCE_THRESHOLD = 400.0
-        private const val SILENCE_DURATION_MS = 1500L  // 1.5s de silêncio = fim da fala
-        private const val MAX_DURATION_MS = 8000L      // máximo 8s de gravação
-        private const val MIN_DURATION_MS = 500L       // mínimo 0.5s para processar
+        private const val ENCODING = AudioFormat.ENCODING_PCM_16BIT
+        private const val SILENCE_THRESHOLD = 350.0
+        // Precisa de 2s contínuos de silêncio para considerar fim da fala
+        private const val SILENCE_CONFIRM_MS = 2000L
+        private const val MAX_DURATION_MS = 12000L  // máximo 12s
+        private const val MIN_SPEECH_MS = 400L      // mínimo para processar
     }
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val recording = AtomicBoolean(false)
     private var recordJob: Job? = null
-    private var isRecording: Boolean = false
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val whisperClient = WhisperClient(context)
 
     fun startListening() {
-        if (isRecording) return
-        isRecording = true
-        Log.d(TAG, "Iniciando captura de comando")
+        if (recording.get()) return
+        recording.set(true)
+        Log.d(TAG, "STTEngine: iniciando captura de comando")
 
         recordJob = scope.launch {
-            val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL, FORMAT)
-            val audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                SAMPLE_RATE, CHANNEL, FORMAT,
-                bufferSize * 4
-            )
-
-            if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
-                Log.e(TAG, "AudioRecord não inicializou")
-                withContext(Dispatchers.Main) { onResult("") }
-                return@launch
-            }
-
-            audioRecord.startRecording()
-            val allData = mutableListOf<Short>()
-            val buffer = ShortArray(bufferSize)
-            val startTime = System.currentTimeMillis()
-            var silenceStart = 0L
-            var hasSpeech = false
+            val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL, ENCODING)
+            var audioRecord: AudioRecord? = null
 
             try {
-                while (isRecording) {
+                audioRecord = AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    SAMPLE_RATE, CHANNEL, ENCODING,
+                    bufferSize * 4
+                )
+
+                if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+                    Log.e(TAG, "AudioRecord não inicializou")
+                    withContext(Dispatchers.Main) { onResult("") }
+                    return@launch
+                }
+
+                audioRecord.startRecording()
+                val allData = mutableListOf<Short>()
+                val buffer = ShortArray(bufferSize)
+                val startTime = System.currentTimeMillis()
+                var silenceStartTime = 0L
+                var hasSpeech = false
+                var speechStartTime = 0L
+
+                while (recording.get()) {
                     val read = audioRecord.read(buffer, 0, bufferSize)
                     if (read <= 0) continue
 
                     allData.addAll(buffer.take(read))
 
                     val rms = calculateRMS(buffer, read)
-                    val elapsed = System.currentTimeMillis() - startTime
+                    val now = System.currentTimeMillis()
+                    val elapsed = now - startTime
 
                     if (rms > SILENCE_THRESHOLD) {
-                        hasSpeech = true
-                        silenceStart = 0L
+                        // Voz detectada
+                        if (!hasSpeech) {
+                            hasSpeech = true
+                            speechStartTime = now
+                            Log.d(TAG, "Início da fala detectado")
+                        }
+                        silenceStartTime = 0L  // resetar contador de silêncio
                     } else if (hasSpeech) {
-                        if (silenceStart == 0L) silenceStart = System.currentTimeMillis()
-                        val silenceDuration = System.currentTimeMillis() - silenceStart
-                        if (silenceDuration >= SILENCE_DURATION_MS) {
-                            Log.d(TAG, "Silêncio detectado — fim da fala")
+                        // Silêncio após fala
+                        if (silenceStartTime == 0L) {
+                            silenceStartTime = now
+                        }
+                        val silenceDuration = now - silenceStartTime
+
+                        // Só para se tiver silêncio confirmado por SILENCE_CONFIRM_MS
+                        if (silenceDuration >= SILENCE_CONFIRM_MS) {
+                            Log.d(TAG, "Silêncio confirmado (${silenceDuration}ms) — fim da fala")
                             break
                         }
                     }
 
+                    // Timeout máximo
                     if (elapsed >= MAX_DURATION_MS) {
-                        Log.d(TAG, "Timeout máximo de gravação")
+                        Log.d(TAG, "Timeout máximo atingido")
                         break
                     }
                 }
-            } finally {
-                audioRecord.stop()
-                audioRecord.release()
-                isRecording = false
-            }
 
-            val elapsed = System.currentTimeMillis() - startTime
-            if (elapsed < MIN_DURATION_MS || allData.isEmpty()) {
+                val speechDuration = if (speechStartTime > 0L) {
+                    System.currentTimeMillis() - speechStartTime
+                } else {
+                    0L
+                }
+
+                if (speechDuration < MIN_SPEECH_MS || allData.isEmpty()) {
+                    Log.d(TAG, "Fala muito curta ou vazia")
+                    withContext(Dispatchers.Main) { onResult("") }
+                    return@launch
+                }
+
+                Log.d(TAG, "Enviando ${allData.size} samples para Whisper")
+                val text = whisperClient.transcribe(allData.toShortArray())
+                Log.d(TAG, "Transcrição final: '$text'")
+                withContext(Dispatchers.Main) { onResult(text) }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Erro na gravação: ${e.message}")
                 withContext(Dispatchers.Main) { onResult("") }
-                return@launch
+            } finally {
+                recording.set(false)
+                try {
+                    audioRecord?.stop()
+                    audioRecord?.release()
+                } catch (e: Exception) { /* ignorar */ }
             }
-
-            // Transcrever com Whisper
-            Log.d(TAG, "Enviando ${allData.size} samples para Whisper")
-            val text = whisperClient.transcribe(allData.toShortArray())
-            Log.d(TAG, "Transcrição: '$text'")
-            withContext(Dispatchers.Main) { onResult(text) }
         }
     }
 
     fun stopListening() {
-        isRecording = false
+        recording.set(false)
         recordJob?.cancel()
     }
 
     private fun calculateRMS(buffer: ShortArray, length: Int): Double {
         var sum = 0.0
         for (i in 0 until length) {
-            sum += buffer[i].toDouble() * buffer[i].toDouble()
+            val s = buffer[i].toDouble()
+            sum += s * s
         }
         return sqrt(sum / length)
     }

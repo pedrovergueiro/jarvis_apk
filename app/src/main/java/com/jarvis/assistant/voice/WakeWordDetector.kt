@@ -9,15 +9,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlin.math.abs
+import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.sqrt
 
 /**
- * Wake word detector usando AudioRecord puro — funciona com tela apagada.
- * Fluxo: VAD detecta voz → grava chunk → envia para Whisper → checa "jarvis"
+ * Wake word detector via AudioRecord + Whisper.
+ * Funciona com tela apagada e em background.
+ * VAD detecta energia de voz → grava → Whisper transcreve → checa "jarvis"
  */
 class WakeWordDetector(
     private val context: Context,
@@ -27,130 +28,141 @@ class WakeWordDetector(
         private const val TAG = "WakeWordDetector"
         private const val SAMPLE_RATE = 16000
         private const val CHANNEL = AudioFormat.CHANNEL_IN_MONO
-        private const val FORMAT = AudioFormat.ENCODING_PCM_16BIT
-        private const val VAD_THRESHOLD = 600        // energia mínima para considerar voz
-        private const val CHUNK_DURATION_MS = 2500L  // grava 2.5s após detectar voz
+        private const val ENCODING = AudioFormat.ENCODING_PCM_16BIT
+        private const val VAD_THRESHOLD = 600.0
+        private const val CHUNK_DURATION_MS = 2500L
         private val WAKE_WORDS = listOf(
             "jarvis", "jávis", "járvis", "jarves", "jarwis",
             "ei jarvis", "hey jarvis", "ok jarvis", "oi jarvis",
-            "jarvi", "jarbi", "zarvis", "harvis", "jarvis"
+            "jarvi", "jarbi", "zarvis", "harvis"
         )
     }
 
-    private var isActive: Boolean = false
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    // AtomicBoolean para ser seguro entre threads/coroutines
+    private val running = AtomicBoolean(false)
     private var vadJob: Job? = null
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val whisperClient = WhisperClient(context)
 
     fun start() {
-        if (isActive) return
-        isActive = true
-        Log.d(TAG, "WakeWordDetector iniciado via AudioRecord")
+        if (running.get()) return
+        running.set(true)
+        Log.d(TAG, "WakeWordDetector iniciado")
         startVADLoop()
     }
 
     private fun startVADLoop() {
         vadJob?.cancel()
         vadJob = scope.launch {
-            val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL, FORMAT)
-            val audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                SAMPLE_RATE, CHANNEL, FORMAT,
-                bufferSize * 4
-            )
-
-            if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
-                Log.e(TAG, "AudioRecord falhou ao inicializar")
-                return@launch
-            }
-
-            audioRecord.startRecording()
-            val buffer = ShortArray(bufferSize)
+            val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL, ENCODING)
+            var audioRecord: AudioRecord? = null
 
             try {
-                while (isActive && isActive) {
+                audioRecord = AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    SAMPLE_RATE, CHANNEL, ENCODING,
+                    bufferSize * 4
+                )
+
+                if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+                    Log.e(TAG, "AudioRecord não inicializou")
+                    return@launch
+                }
+
+                audioRecord.startRecording()
+                val buffer = ShortArray(bufferSize)
+
+                while (running.get()) {
                     val read = audioRecord.read(buffer, 0, bufferSize)
                     if (read <= 0) continue
 
-                    // VAD: calcular energia RMS
                     val rms = calculateRMS(buffer, read)
 
                     if (rms > VAD_THRESHOLD) {
-                        // Voz detectada — gravar chunk completo
-                        Log.d(TAG, "Voz detectada (RMS=$rms), gravando...")
+                        Log.d(TAG, "Voz detectada RMS=$rms, gravando chunk...")
                         audioRecord.stop()
 
-                        val audioData = recordChunk(CHUNK_DURATION_MS)
-                        if (audioData.isNotEmpty()) {
-                            val text = whisperClient.transcribe(audioData)
-                            Log.d(TAG, "Whisper ouviu: '$text'")
+                        val chunk = recordChunk(CHUNK_DURATION_MS)
+                        if (chunk.isNotEmpty()) {
+                            val text = whisperClient.transcribe(chunk)
+                            Log.d(TAG, "Whisper: '$text'")
                             val lower = text.lowercase().trim()
                             val found = WAKE_WORDS.any { lower.contains(it) }
-                            if (found && isActive) {
-                                isActive = false
+                            if (found && running.get()) {
+                                running.set(false)
                                 Log.d(TAG, "Wake word detectada!")
-                                kotlinx.coroutines.withContext(Dispatchers.Main) {
-                                    onWakeWord()
-                                }
+                                withContext(Dispatchers.Main) { onWakeWord() }
                                 return@launch
                             }
                         }
 
-                        // Reiniciar gravação
-                        audioRecord.startRecording()
+                        if (running.get()) {
+                            audioRecord.startRecording()
+                        }
                     }
                 }
             } finally {
-                audioRecord.stop()
-                audioRecord.release()
+                try {
+                    audioRecord?.stop()
+                    audioRecord?.release()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Erro ao liberar AudioRecord: ${e.message}")
+                }
             }
         }
     }
 
     private fun recordChunk(durationMs: Long): ShortArray {
         val totalSamples = (SAMPLE_RATE * durationMs / 1000).toInt()
-        val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL, FORMAT)
-        val audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            SAMPLE_RATE, CHANNEL, FORMAT,
-            bufferSize * 4
-        )
-        val data = ShortArray(totalSamples)
-        var offset = 0
-        audioRecord.startRecording()
-        val buf = ShortArray(bufferSize)
-        while (offset < totalSamples) {
-            val read = audioRecord.read(buf, 0, minOf(bufferSize, totalSamples - offset))
-            if (read <= 0) break
-            buf.copyInto(data, offset, 0, read)
-            offset += read
+        val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL, ENCODING)
+        var audioRecord: AudioRecord? = null
+        return try {
+            audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                SAMPLE_RATE, CHANNEL, ENCODING,
+                bufferSize * 4
+            )
+            val data = ShortArray(totalSamples)
+            var offset = 0
+            audioRecord.startRecording()
+            val buf = ShortArray(bufferSize)
+            while (offset < totalSamples) {
+                val read = audioRecord.read(buf, 0, minOf(bufferSize, totalSamples - offset))
+                if (read <= 0) break
+                buf.copyInto(data, offset, 0, read)
+                offset += read
+            }
+            data
+        } catch (e: Exception) {
+            Log.e(TAG, "Erro ao gravar chunk: ${e.message}")
+            ShortArray(0)
+        } finally {
+            try {
+                audioRecord?.stop()
+                audioRecord?.release()
+            } catch (e: Exception) { /* ignorar */ }
         }
-        audioRecord.stop()
-        audioRecord.release()
-        return data
     }
 
     private fun calculateRMS(buffer: ShortArray, length: Int): Double {
         var sum = 0.0
         for (i in 0 until length) {
-            sum += buffer[i].toDouble() * buffer[i].toDouble()
+            val s = buffer[i].toDouble()
+            sum += s * s
         }
-        return Math.sqrt(sum / length)
+        return sqrt(sum / length)
     }
 
     fun stop() {
-        isActive = false
+        running.set(false)
         vadJob?.cancel()
-        scope.cancel()
     }
 
     fun restart() {
-        isActive = false
-        vadJob?.cancel()
-        val newScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-        newScope.launch {
-            delay(500L)
-            isActive = true
+        stop()
+        CoroutineScope(Dispatchers.IO).launch {
+            delay(600L)
+            running.set(true)
             startVADLoop()
         }
     }
