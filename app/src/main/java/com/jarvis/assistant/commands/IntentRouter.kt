@@ -2,6 +2,7 @@ package com.jarvis.assistant.commands
 
 import android.content.Context
 import android.util.Log
+import com.jarvis.assistant.automation.AutomationEngine
 import com.jarvis.assistant.memory.MemoryManager
 import org.json.JSONObject
 
@@ -19,6 +20,7 @@ class IntentRouter(
     }
 
     private val executor = CommandExecutor(context)
+    private val automationEngine = AutomationEngine(context)
 
     // Mapeamento de padrões para intenções
     private val intentPatterns = listOf(
@@ -176,6 +178,10 @@ class IntentRouter(
      * Executa a intenção detectada.
      */
     suspend fun execute(intent: DetectedIntent, originalCommand: String): String {
+        // Verificar se é automação antes de executar intenção padrão
+        if (automationEngine.isAutomationCommand(originalCommand)) {
+            return automationEngine.execute(originalCommand)
+        }
         return try {
             when (intent.type) {
                 "OPEN_APP" -> executor.openApp(intent.params["app"] ?: "")

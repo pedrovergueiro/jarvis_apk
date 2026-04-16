@@ -202,6 +202,51 @@ async def clear_history():
     conversation_history.clear()
     return {"status": "cleared"}
 
+# ─── Execução de Scripts no PC ───────────────────────────────────────────────
+
+class ScriptRequest(BaseModel):
+    script: str
+    lang: str = "python"
+    source: str = "android"
+
+@app.post("/pc/execute")
+async def execute_pc_script(request: ScriptRequest):
+    """
+    Executa script no PC (Python ou PowerShell).
+    Chamado pelo Android quando a Natiele cria uma automação para o PC.
+    """
+    import subprocess
+    import tempfile
+
+    try:
+        if request.lang == "python":
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                f.write(request.script)
+                tmp_path = f.name
+            result = subprocess.run(
+                ["python", tmp_path],
+                capture_output=True, text=True, timeout=30
+            )
+            os.unlink(tmp_path)
+            output = result.stdout or result.stderr or "Script executado."
+            return {"status": "ok", "output": output[:500], "source": request.source}
+
+        elif request.lang == "powershell":
+            result = subprocess.run(
+                ["powershell", "-Command", request.script],
+                capture_output=True, text=True, timeout=30
+            )
+            output = result.stdout or result.stderr or "Script executado."
+            return {"status": "ok", "output": output[:500], "source": request.source}
+
+        else:
+            return {"status": "error", "output": f"Linguagem '{request.lang}' não suportada."}
+
+    except subprocess.TimeoutExpired:
+        return {"status": "timeout", "output": "Script demorou mais de 30s."}
+    except Exception as e:
+        return {"status": "error", "output": str(e)}
+
 # ─── Health ───────────────────────────────────────────────────────────────────
 
 @app.get("/health")
